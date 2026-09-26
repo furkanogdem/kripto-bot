@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -24,7 +25,6 @@ TARGET_CHAT_ID = None
 logging.basicConfig(level=logging.INFO)
 DB_PATH = "kripto_bot.db"
 
-# Volatilite Takip Hafızası (In-Memory)
 PRICE_HISTORY = {}        # symbol -> [(timestamp, price)]
 LAST_VOLATILITY_ALERT = {} # symbol -> timestamp
 
@@ -219,8 +219,10 @@ def check_volume_spike(candles):
     return None
 
 def calculate_ema(closes, period=20):
+    if not closes:
+        return 0.0
     if len(closes) < period:
-        return closes[-1] if closes else 0.0
+        return closes[-1]
     k = 2 / (period + 1)
     ema = closes[0]
     for p in closes[1:]:
@@ -424,10 +426,228 @@ async def fetch_filtered_rss_news(session):
     return []
 
 # ==========================================
-# ANİ FİYAT HAREKETİ (VOLATİLİTE) RADARI
+# 1. SPOT ETF AKIŞI MOTORU (FARSIDE INVESTORS)
+# ==========================================
+def parse_farside_table(html):
+    try:
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+        data_rows = []
+        for r in rows:
+            cells = re.findall(r'<td[^>]*>(.*?)</td>', r, re.DOTALL | re.IGNORECASE)
+            if not cells:
+                continue
+            clean_cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+            if clean_cells and any(char.isdigit() for char in clean_cells[0]) and len(clean_cells) >= 5:
+                data_rows.append(clean_cells)
+
+        if not data_rows:
+            return None
+
+        last_row = data_rows[-1]
+
+        def parse_val(v_str):
+            if not v_str or v_str == "-":
+                return 0.0
+            v_str = v_str.replace(",", "").strip()
+            if v_str.startswith("(") and v_str.endswith(")"):
+                v_str = "-" + v_str[1:-1]
+            try:
+                return float(v_str)
+            except ValueError:
+                return 0.0
+
+        return {
+            "date": last_row[0],
+            "total": parse_val(last_row[-1]),
+            "ibit": parse_val(last_row[1]) if len(last_row) > 1 else 0.0,
+            "fbtc": parse_val(last_row[2]) if len(last_row) > 2 else 0.0,
+            "gbtc": parse_val(last_row[-2]) if len(last_row) > 3 else 0.0
+        }
+    except Exception as e:
+        logging.warning(f"Farside parse hatası: {e}")
+        return None
+
+async def fetch_etf_flows_report(session):
+    btc_url = "https://farside.co.uk/btc/"
+    eth_url = "https://farside.co.uk/eth/"
+
+    btc_data, eth_data = None, None
+    try:
+        async with session.get(btc_url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+            if resp.status == 200:
+                btc_data = parse_farside_table(await resp.text())
+    except Exception:
+        pass
+
+    try:
+        async with session.get(eth_url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+            if resp.status == 200:
+                eth_data = parse_farside_table(await resp.text())
+    except Exception:
+        pass
+
+    lines = ["🏦 <b>SPOT BITCOIN & ETHEREUM ETF AKIŞLARI</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+
+    if btc_data:
+        t_icon = "🟢" if btc_data["total"] >= 0 else "🔴"
+        t_sign = "+" if btc_data["total"] >= 0 else ""
+        lines.append(
+            f"🪙 <b>Bitcoin Spot ETF (Tarih: {btc_data['date']}):</b>\n"
+            f"• <b>Net Toplam Akış:</b> {t_icon} <code>{t_sign}${btc_data['total']:,.1f} Milyon</code>\n"
+            f"• BlackRock (IBIT): <code>${btc_data['ibit']:,.1f}M</code>\n"
+            f"• Fidelity (FBTC): <code>${btc_data['fbtc']:,.1f}M</code>\n"
+            f"• Grayscale (GBTC): <code>${btc_data['gbtc']:,.1f}M</code>\n"
+        )
+    else:
+        lines.append("🪙 <b>Bitcoin Spot ETF:</b> Son seans verisi güncelleniyor...\n")
+
+    if eth_data:
+        et_icon = "🟢" if eth_data["total"] >= 0 else "🔴"
+        et_sign = "+" if eth_data["total"] >= 0 else ""
+        lines.append(
+            f"💎 <b>Ethereum Spot ETF (Tarih: {eth_data['date']}):</b>\n"
+            f"• <b>Net Toplam Akış:</b> {et_icon} <code>{et_sign}${eth_data['total']:,.1f} Milyon</code>\n"
+        )
+    else:
+        lines.append("💎 <b>Ethereum Spot ETF:</b> Son seans verisi güncelleniyor...\n")
+
+    lines.append(
+        "💡 <i>Not: ETF verileri her iş günü ABD borsa kapanışı sonrası (gece saatlerinde) kesinleşir. Pozitif girişler kurumsal alım gücünü yansıtır.</i>"
+    )
+    return "\n".join(lines)
+
+# ==========================================
+# 2. LİKİDASYON & KALDIRAÇ RADARI
+# ==========================================
+async def fetch_liquidation_report(session):
+    try:
+        ls_url = "https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=1h&limit=1"
+        long_pct, short_pct, ls_ratio = 50.0, 50.0, 1.0
+        async with session.get(ls_url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data and isinstance(data, list):
+                    long_pct = float(data[0].get("longAccount", 0.5)) * 100
+                    short_pct = float(data[0].get("shortAccount", 0.5)) * 100
+                    ls_ratio = float(data[0].get("longShortRatio", 1.0))
+
+        oi_url = "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"
+        oi_val_usd = 0.0
+        cur_btc = await fetch_current_price(session, "BTCUSDT") or 90000.0
+        async with session.get(oi_url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                oi_coins = float(data.get("openInterest", 0.0))
+                oi_val_usd = oi_coins * cur_btc
+
+        fo_url = "https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=60"
+        long_liq, short_liq = 0.0, 0.0
+        async with session.get(fo_url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+            if resp.status == 200:
+                orders = await resp.json()
+                if isinstance(orders, list):
+                    for o in orders:
+                        qty = float(o.get("executedQty", 0.0))
+                        p = float(o.get("averagePrice", 0.0))
+                        val = qty * p
+                        if o.get("side") == "SELL":
+                            long_liq += val
+                        else:
+                            short_liq += val
+
+        btc_fund_val = await fetch_funding_rate_value(session, "BTCUSDT")
+        fund_txt = format_funding_human(btc_fund_val)
+
+        state_note = ""
+        if ls_ratio > 1.8:
+            state_note = "⚠️ <b>Aşırı Long Birikmesi:</b> Kaldıraçlı alıcılar yoğun, aşağı yönlü bir silkeleme/long patlatma riski yüksek!"
+        elif ls_ratio < 0.8:
+            state_note = "🔥 <b>Aşırı Short Baskısı:</b> Düşüşe oynayanlar çoğunlukta, ani bir yukarı short squeeze patlaması gelebilir!"
+        else:
+            state_note = "⚖️ <b>Dengeli Pozisyon Dağılımı:</b> Vadeli piyasada yön dengeli seyrediyor."
+
+        return (
+            f"💥 <b>PİYASA TASFİYE & KALDIRAÇ RAPORU</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 <b>Bitcoin (BTC) Vadeli Görünüm:</b>\n"
+            f"• <b>Açık Pozisyon (OI):</b> <code>${oi_val_usd / 1e9:,.2f} Milyar</code>\n"
+            f"• <b>Pozisyon Dağılımı:</b> 🟢 %{long_pct:.1f} Long vs 🔴 %{short_pct:.1f} Short\n"
+            f"• <b>Long/Short Oranı:</b> <code>{ls_ratio:.2f}</code>\n"
+            f"• <b>Vadeli Fonlama:</b> {fund_txt}\n\n"
+            f"⚡ <b>Son Tasfiyeler (Binance BTC):</b>\n"
+            f"🔴 Long Tasfiyesi: <code>${long_liq / 1e6:,.2f}M</code>\n"
+            f"🟢 Short Tasfiyesi: <code>${short_liq / 1e6:,.2f}M</code>\n\n"
+            f"💡 {state_note}"
+        )
+    except Exception as e:
+        return f"⚠️ Tasfiye verileri alınırken hata oluştu: {e}"
+
+# ==========================================
+# 3. KRİTİK GÜNLÜK KAPANIŞ RAPORU (TSİ 03:05)
+# ==========================================
+async def build_daily_close_report():
+    async with aiohttp.ClientSession() as session:
+        btc_c = await fetch_crypto_klines(session, "BTCUSDT", "1d", 30)
+        eth_c = await fetch_crypto_klines(session, "ETHUSDT", "1d", 30)
+        btcd_val = await fetch_btc_dominance(session)
+        fear_greed = await fetch_fear_and_greed(session)
+
+        if not btc_c or len(btc_c) < 2:
+            return "⚠️ Günlük kapanış verileri alınamadı."
+
+        prev_day = btc_c[-2]
+        open_p = float(prev_day[1])
+        high_p = float(prev_day[2])
+        low_p = float(prev_day[3])
+        close_p = float(prev_day[4])
+        chg_pct = ((close_p - open_p) / open_p) * 100
+
+        closes_30 = [float(c[4]) for c in btc_c[:-1]]
+        ema20 = calculate_ema(closes_30, 20)
+        ema_status = "🟢 20 Günlük EMA Üzerinde (Pozitif)" if close_p > ema20 else "🔴 20 Günlük EMA Altında (Dirençte)"
+
+        s_str, r_str = calculate_sr_from_candles(btc_c[:-1], close_p)
+        c_icon = "🟢 BOĞA" if chg_pct >= 0 else "🔴 AYI"
+
+        tracked = get_tracked_coins()
+        coin_performances = []
+        for c in tracked:
+            c_candles = await fetch_crypto_klines(session, c["symbol"], "1d", 5)
+            if c_candles and len(c_candles) >= 2:
+                c_prev = c_candles[-2]
+                c_o, c_c = float(c_prev[1]), float(c_prev[4])
+                c_pct = ((c_c - c_o) / c_o) * 100
+                coin_performances.append((c["name"], c_pct, c_c))
+
+        coin_performances.sort(key=lambda x: x[1], reverse=True)
+        best_coin = coin_performances[0] if coin_performances else None
+        worst_coin = coin_performances[-1] if coin_performances else None
+
+        best_str = f"🏆 <b>Günün Lideri:</b> {best_coin[0]} (<code>+%{best_coin[1]:.2f}</code>)" if best_coin and best_coin[1] > 0 else ""
+        worst_str = f"🔻 <b>Günün En Çok Düşeni:</b> {worst_coin[0]} (<code>%{worst_coin[1]:.2f}</code>)" if worst_coin and worst_coin[1] < 0 else ""
+
+        now_tr = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y")
+
+        return (
+            f"🌙 <b>KRİTİK GÜNLÜK MUM KAPANIŞI (UTC 00:00 / TSİ 03:00)</b>\n"
+            f"📅 <b>Tarih:</b> {now_tr}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 <b>Bitcoin (BTC) Kapanış:</b> <code>${close_p:,.2f}</code>\n"
+            f"📊 <b>Günlük Değişim:</b> {c_icon} (<code>{chg_pct:+.2f}%</code>)\n"
+            f"📏 <b>Gün İçi Aralık:</b> <code>${low_p:,.2f}</code> - <code>${high_p:,.2f}</code>\n"
+            f"📈 <b>Trend Durumu:</b> {ema_status}\n\n"
+            f"🛡️ <b>Yeni Günün Ana Desteği:</b> <code>{s_str}</code>\n"
+            f"🎯 <b>Yeni Günün Ana Direnci:</b> <code>{r_str}</code>\n\n"
+            f"🎭 <b>Korku/Açgözlülük:</b> {fear_greed}\n"
+            f"📊 <b>BTC Dominansı:</b> %{btcd_val:.2f}\n\n"
+            f"{best_str}\n{worst_str}\n\n"
+            f"💡 <b>Yeni Seans Stratejisi:</b> Fiyat {s_str} desteğini korudukça yukarıda {r_str} direnci hedeflenir. Altına sarkmalarda temkinli olunmalıdır."
+        )
+
+# ==========================================
+# ANİ FİYAT HAREKETİ RADARI
 # ==========================================
 async def check_volatility_spikes_job():
-    """Her 60 saniyede bir son 15 dakikalık ani yükseliş/düşüşleri tarar"""
     target_id = TARGET_CHAT_ID or get_saved_chat_id()
     if not target_id:
         return
@@ -446,13 +666,11 @@ async def check_volatility_spikes_job():
                 PRICE_HISTORY[sym] = []
 
             PRICE_HISTORY[sym].append((now, cur_p))
-            # 15 dakikadan (900 sn) eski verileri temizle
             PRICE_HISTORY[sym] = [(t, p) for t, p in PRICE_HISTORY[sym] if now - t <= 900]
 
             if len(PRICE_HISTORY[sym]) < 2:
                 continue
 
-            # 30 dakika spam koruması (Cooldown)
             if now - LAST_VOLATILITY_ALERT.get(sym, 0) < 1800:
                 continue
 
@@ -460,9 +678,7 @@ async def check_volatility_spikes_job():
             min_p = min(prices)
             max_p = max(prices)
 
-            # Eşik: BTC ve ETH için %2.5, altcoinler için %5.0
             threshold = 2.5 if sym in ["BTCUSDT", "ETHUSDT"] else 5.0
-
             pump_pct = ((cur_p - min_p) / min_p) * 100
             dump_pct = ((cur_p - max_p) / max_p) * 100
 
@@ -762,53 +978,7 @@ async def build_full_report():
         return cards
 
 # ==========================================
-# HEDEF FİYAT ALARM DÖNGÜSÜ
-# ==========================================
-async def check_price_alarms_job():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, chat_id, symbol, target_price, direction FROM price_alarms")
-    alarms = cursor.fetchall()
-    if not alarms:
-        conn.close()
-        return
-
-    triggered_ids = []
-    async with aiohttp.ClientSession() as session:
-        for alarm_id, chat_id, symbol, target_price, direction in alarms:
-            cur_price = await fetch_current_price(session, symbol)
-            if not cur_price:
-                continue
-
-            hit = False
-            if direction == "ABOVE" and cur_price >= target_price:
-                hit = True
-            elif direction == "BELOW" and cur_price <= target_price:
-                hit = True
-
-            if hit:
-                triggered_ids.append(alarm_id)
-                direction_icon = "🚀 YUKARI KIRILIM" if direction == "ABOVE" else "📉 AŞAĞI KIRILIM"
-                msg = (
-                    f"🔔 <b>FİYAT ALARMI TETİKLENDİ!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💎 <b>{symbol}:</b> Hedef fiyata ulaştı!\n"
-                    f"🎯 Hedef: <code>${target_price:,.4f}</code>\n"
-                    f"💰 Güncel Fiyat: <code>${cur_price:,.4f}</code>\n"
-                    f"⚡ Durum: <b>{direction_icon}</b>"
-                )
-                try:
-                    await bot.send_message(chat_id, msg)
-                except Exception as e:
-                    logging.error(f"Alarm bildirim hatası: {e}")
-
-    if triggered_ids:
-        cursor.execute(f"DELETE FROM price_alarms WHERE id IN ({','.join(['?']*len(triggered_ids))})", triggered_ids)
-        conn.commit()
-    conn.close()
-
-# ==========================================
-# TELEGRAM KOMUTLARI
+# TELEGRAM YÖNETİCİSİ VE BUTONLAR
 # ==========================================
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -831,7 +1001,17 @@ async def scheduled_report_job():
         try:
             await send_market_report(target_id)
         except Exception as e:
-            logging.error(f"Zamanlanmış bildirim hatası: {e}")
+            logging.error(f"Zamanlanmış rapor hatası: {e}")
+
+async def scheduled_daily_close_job():
+    """TSİ 03:05'te (UTC 00:05) otomatik günlük kapanış raporu gönderir"""
+    target_id = TARGET_CHAT_ID or get_saved_chat_id()
+    if target_id:
+        try:
+            report = await build_daily_close_report()
+            await bot.send_message(target_id, report)
+        except Exception as e:
+            logging.error(f"Günlük kapanış job hatası: {e}")
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
@@ -842,30 +1022,59 @@ async def cmd_start(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Şimdi Analiz Raporu Al", callback_data="btn_run_analysis")],
         [
-            InlineKeyboardButton(text="🏦 FED & Makro Veriler", callback_data="btn_macro"),
-            InlineKeyboardButton(text="📰 Son Dakika Haberler", callback_data="btn_news")
+            InlineKeyboardButton(text="🏦 Spot ETF Akışları", callback_data="btn_etf"),
+            InlineKeyboardButton(text="💥 Tasfiye & Kaldıraç", callback_data="btn_liquidation")
         ],
-        [InlineKeyboardButton(text="📋 Takip Listem & Alarmlar", callback_data="btn_show_list")]
+        [
+            InlineKeyboardButton(text="🌙 Günlük Kapanış (03:05)", callback_data="btn_daily_close"),
+            InlineKeyboardButton(text="🏛️ FED & Makro Takvim", callback_data="btn_macro")
+        ],
+        [
+            InlineKeyboardButton(text="📰 Son Dakika Haberler", callback_data="btn_news"),
+            InlineKeyboardButton(text="📋 Takip Listem & Alarmlar", callback_data="btn_show_list")
+        ]
     ])
     
     help_text = (
         "🚀 <b>Kripto İstihbarat & Makro Terminali Aktif!</b>\n\n"
         "• <b>/analiz:</b> Bağımsız Dolar Sinyali & 3 Kademeli S/R seviyeleri.\n"
+        "• <b>/etf:</b> Spot Bitcoin & Ethereum ETF net giriş/çıkışları.\n"
+        "• <b>/tasfiye:</b> Long/Short tasfiyeleri & Açık Pozisyon (OI) hacmi.\n"
+        "• <b>/kapanis:</b> Kritik Günlük Kapanış Değerlendirmesi.\n"
         "• <b>/makro:</b> Bu haftaki kritik ABD verileri (FED, İstihdam, Enflasyon).\n"
         "• <b>/haberler:</b> Filtrelenmiş sıcak kripto haberleri (Türkçe).\n"
         "• <b>/ekle &lt;coin&gt; | /sil &lt;coin&gt;:</b> Liste yönetimi.\n"
         "• <b>/alarm &lt;coin&gt; &lt;fiyat&gt;:</b> Anlık fiyat alarmı.\n"
         "• <b>/liste:</b> Aktif listeni ve kurulan alarmları gösterir.\n\n"
-        "🚨 <b>Otomatik Radarlar Devrede:</b>\n"
-        "• 15 dakikalık ani pump/dump hareketleri (BTC/ETH $\\pm\\%2.5$, Altcoinler $\\pm\\%5.0$)\n"
-        "• Sıcak piyasa haberleri anında iletilir.\n"
-        "⏰ Her saatin <b>:30 geçesinde</b> otomatik rapor iletilecektir."
+        "⏰ <b>Otomatik Gönderimler:</b>\n"
+        "• Her saat <b>:30 geçe</b> Analiz Raporu\n"
+        "• Her gece <b>TSİ 03:05'te</b> Günlük Mum Kapanış Özeti"
     )
     await message.answer(help_text, reply_markup=keyboard)
 
 @dp.message(Command("analiz"))
 async def cmd_analiz(message: Message):
     await send_market_report(message.chat.id)
+
+@dp.message(Command("etf"))
+async def cmd_etf(message: Message):
+    await message.answer("⏳ <i>Kurumsal ETF akışları derleniyor...</i>")
+    async with aiohttp.ClientSession() as session:
+        report = await fetch_etf_flows_report(session)
+    await message.answer(report)
+
+@dp.message(Command("tasfiye"))
+async def cmd_tasfiye(message: Message):
+    await message.answer("⏳ <i>Binance kaldıraç ve tasfiye verileri taranıyor...</i>")
+    async with aiohttp.ClientSession() as session:
+        report = await fetch_liquidation_report(session)
+    await message.answer(report)
+
+@dp.message(Command("kapanis"))
+async def cmd_kapanis(message: Message):
+    await message.answer("⏳ <i>Günlük mum kapanış verileri analiz ediliyor...</i>")
+    report = await build_daily_close_report()
+    await message.answer(report)
 
 @dp.message(Command("makro"))
 async def cmd_makro(message: Message):
@@ -1039,6 +1248,21 @@ async def callback_analiz(callback: CallbackQuery):
     await callback.answer("Hızlı analiz başlatıldı...")
     await send_market_report(callback.message.chat.id)
 
+@dp.callback_query(F.data == "btn_etf")
+async def callback_etf(callback: CallbackQuery):
+    await callback.answer("ETF verileri getiriliyor...")
+    await cmd_etf(callback.message)
+
+@dp.callback_query(F.data == "btn_liquidation")
+async def callback_liquidation(callback: CallbackQuery):
+    await callback.answer("Tasfiye verileri getiriliyor...")
+    await cmd_tasfiye(callback.message)
+
+@dp.callback_query(F.data == "btn_daily_close")
+async def callback_daily_close(callback: CallbackQuery):
+    await callback.answer("Günlük kapanış getiriliyor...")
+    await cmd_kapanis(callback.message)
+
 @dp.callback_query(F.data == "btn_macro")
 async def callback_macro(callback: CallbackQuery):
     await callback.answer("Makro veriler taranıyor...")
@@ -1054,19 +1278,67 @@ async def callback_list(callback: CallbackQuery):
     await callback.answer()
     await cmd_liste(callback.message)
 
+# ==========================================
+# FİYAT ALARM BEKÇİSİ
+# ==========================================
+async def check_price_alarms_job():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, chat_id, symbol, target_price, direction FROM price_alarms")
+    alarms = cursor.fetchall()
+    if not alarms:
+        conn.close()
+        return
+
+    triggered_ids = []
+    async with aiohttp.ClientSession() as session:
+        for alarm_id, chat_id, symbol, target_price, direction in alarms:
+            cur_price = await fetch_current_price(session, symbol)
+            if not cur_price:
+                continue
+
+            hit = False
+            if direction == "ABOVE" and cur_price >= target_price:
+                hit = True
+            elif direction == "BELOW" and cur_price <= target_price:
+                hit = True
+
+            if hit:
+                triggered_ids.append(alarm_id)
+                direction_icon = "🚀 YUKARI KIRILIM" if direction == "ABOVE" else "📉 AŞAĞI KIRILIM"
+                msg = (
+                    f"🔔 <b>FİYAT ALARMI TETİKLENDİ!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>{symbol}:</b> Hedef fiyata ulaştı!\n"
+                    f"🎯 Hedef: <code>${target_price:,.4f}</code>\n"
+                    f"💰 Güncel Fiyat: <code>${cur_price:,.4f}</code>\n"
+                    f"⚡ Durum: <b>{direction_icon}</b>"
+                )
+                try:
+                    await bot.send_message(chat_id, msg)
+                except Exception as e:
+                    logging.error(f"Alarm bildirim hatası: {e}")
+
+    if triggered_ids:
+        cursor.execute(f"DELETE FROM price_alarms WHERE id IN ({','.join(['?']*len(triggered_ids))})", triggered_ids)
+        conn.commit()
+    conn.close()
+
 async def web_health_check(request):
     return web.Response(text="Bot 7/24 aktif calisiyor!")
 
 async def main():
     init_db()
 
-    # 1. Saatlik Analiz (:30'da)
+    # 1. Saatlik Analiz (:30 geçe)
     scheduler.add_job(scheduled_report_job, 'cron', minute=30)
-    # 2. Hedef Fiyat Alarmı Bekçisi (Her 40 saniyede bir)
+    # 2. Günlük Kapanış Raporu (UTC 00:05 / TSİ 03:05)
+    scheduler.add_job(scheduled_daily_close_job, 'cron', hour=0, minute=5)
+    # 3. Fiyat Alarmı Bekçisi (Her 40 sn)
     scheduler.add_job(check_price_alarms_job, 'interval', seconds=40)
-    # 3. Otomatik Sıcak Haber Bekçisi (Her 90 saniyede bir)
+    # 4. Sıcak Haber Bekçisi (Her 90 sn)
     scheduler.add_job(check_breaking_news_job, 'interval', seconds=90)
-    # 4. Ani Fiyat Hareketi (Volatilite) Radarı (Her 60 saniyede bir)
+    # 5. Ani Fiyat Hareketi (Volatilite) Radarı (Her 60 sn)
     scheduler.add_job(check_volatility_spikes_job, 'interval', seconds=60)
     
     scheduler.start()
