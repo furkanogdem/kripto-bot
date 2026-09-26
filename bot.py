@@ -36,7 +36,6 @@ TIMEFRAMES = [
     ("1A", "1M")
 ]
 
-# ÖNEMLİ ABD MAKRO VERİLERİ ÇEVİRİ TABLOSU
 MACRO_TRANSLATIONS = {
     "Federal Funds Rate": "FED Faiz Kararı 🏦",
     "FOMC Statement": "FOMC Faiz Beyanatı 🏦",
@@ -152,7 +151,7 @@ def check_rsi_divergence(closes, rsis):
     min_r_rec, min_r_prev = min(recent_r), min(prev_r)
 
     if max_c_rec > max_c_prev * 1.008 and max_r_rec < max_r_prev - 3.5:
-        return "⚠️ <b>Negatif RSI Uyumsuzluğu:</b> Fiyat yeni tepe yaptı fakat momentum zayıfladı (Düzeltme riski)."
+        return "⚠️ <b>Negatif RSI Uyumsuzluğu:</b> Fiyat yükseldi fakat momentum zayıfladı (Düzeltme riski)."
     if min_c_rec < min_c_prev * 0.992 and min_r_rec > min_r_prev + 3.5:
         return "🚀 <b>Pozitif RSI Uyumsuzluğu:</b> Fiyat düştü fakat momentum güçlendi (Tepki yükselişi potansiyeli)."
     return None
@@ -193,11 +192,23 @@ def evaluate_signal(closes, rsi_val):
         return "🔴 SAT"
     return "⚪ NÖTR"
 
-def calculate_daily_sr(daily_candles, current_price):
-    if not daily_candles or len(daily_candles) < 2:
+def format_clean_price(val):
+    """Fiyatları mobilde yer kaplamayacak şekilde temiz formatlar"""
+    if not isinstance(val, (int, float)):
+        return "—"
+    if val >= 10:
+        return f"${val:,.2f}"
+    elif val >= 1:
+        return f"${val:,.3f}"
+    else:
+        return f"${val:,.4f}"
+
+def calculate_sr_from_candles(candles, current_price):
+    """Herhangi bir zaman dilimindeki mumlardan (4s, 1G, 1H) Destek ve Direnç çıkarır"""
+    if not candles or len(candles) < 2:
         return "—", "—"
-    prev_day = daily_candles[-2]
-    high, low, close = float(prev_day[2]), float(prev_day[3]), float(prev_day[4])
+    prev_c = candles[-2]
+    high, low, close = float(prev_c[2]), float(prev_c[3]), float(prev_c[4])
     pivot = (high + low + close) / 3
     r1, s1 = (2 * pivot) - low, (2 * pivot) - high
     r2, s2 = pivot + (high - low), pivot - (high - low)
@@ -206,9 +217,10 @@ def calculate_daily_sr(daily_candles, current_price):
     levels = [s3, s2, s1, pivot, r1, r2, r3]
     supports = [lvl for lvl in levels if lvl < current_price]
     resistances = [lvl for lvl in levels if lvl > current_price]
+
     s_val = max(supports) if supports else s1
     r_val = min(resistances) if resistances else r1
-    return f"${s_val:,.4f}", f"${r_val:,.4f}"
+    return format_clean_price(s_val), format_clean_price(r_val)
 
 def format_funding_human(rate_val):
     if rate_val is None:
@@ -228,7 +240,6 @@ def format_funding_human(rate_val):
         return f"🔥 Aşırı Short {perc_str} — Squeeze (Patlama) Riski"
 
 def format_iso_to_tr_time(iso_str):
-    """ISO formatındaki tarihi Türkiye saatine (UTC+3) çevirir"""
     try:
         dt = datetime.fromisoformat(iso_str)
         tr_dt = dt.astimezone(timezone(timedelta(hours=3)))
@@ -326,7 +337,6 @@ async def fetch_btc_dominance(session):
 # MAKRO EKONOMİK VERİ VE HABER MOTORU
 # ==========================================
 async def fetch_macro_calendar(session):
-    """ForexFactory üzerinden haftalık kritik ABD verilerini çeker"""
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     try:
         async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
@@ -336,7 +346,6 @@ async def fetch_macro_calendar(session):
                 for e in events:
                     if e.get("country") == "USD" and e.get("impact") in ["High", "Medium"]:
                         title = e.get("title", "")
-                        # Özellikle BTC'yi vuran verileri seç
                         if any(k in title for k in [
                             "Non-Farm", "Unemployment", "CPI", "PCE", "Fed", "FOMC", "Rate", "GDP", "PPI", "Retail Sales"
                         ]):
@@ -347,7 +356,6 @@ async def fetch_macro_calendar(session):
     return []
 
 async def fetch_latest_crypto_news(session, limit=5):
-    """CoinTelegraph RSS feed üzerinden son sıcak haberleri çeker"""
     url = "https://cointelegraph.com/rss"
     try:
         async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
@@ -371,7 +379,6 @@ async def fetch_latest_crypto_news(session, limit=5):
     return []
 
 def format_macro_report(events):
-    """Çekilen makro verileri şık bir mesaja dönüştürür"""
     if not events:
         return "📅 <i>Bu hafta için planlanan kritik bir ABD makro verisi bulunmuyor veya takvim henüz güncellenmedi.</i>"
 
@@ -384,11 +391,10 @@ def format_macro_report(events):
         forecast = ev.get("forecast")
         previous = ev.get("previous")
 
-        status_line = ""
         if actual:
             status_line = f"📊 <b>Açıklanan:</b> <code>{actual}</code> | <b>Beklenti:</b> {forecast or '—'} | <b>Önceki:</b> {previous or '—'}"
         else:
-            status_line = f"⏳ <b>Beklenti:</b> <code>{forecast or '—'}</code> | <b>Önceki:</b> <code>{previous or '—'}</code>"
+            status_line = f"⏳ <b>Beklenti:</b> <code>{forecast or '—'}</code> | <b>Önceki:</b> <code>{previous or '—'}"
 
         lines.append(
             f"📌 <b>{tr_name}</b>\n"
@@ -406,25 +412,25 @@ def format_macro_report(events):
     return "🏦 <b>ABD MAKRO EKONOMİ & FED TAKVİMİ (Bu Hafta)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(lines) + "\n" + cheat_sheet
 
 # ==========================================
-# RAPOR MOTORU
+# RAPOR MOTORU (4s, 1G ve 1H Destek/Dirençli)
 # ==========================================
 async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     sym = item["symbol"]
     c_4h_task = fetch_crypto_klines(session, sym, "4h", 35)
-    c_1d_task = fetch_crypto_klines(session, sym, "1d", 15)
+    c_1d_task = fetch_crypto_klines(session, sym, "1d", 20)
+    c_1w_task = fetch_crypto_klines(session, sym, "1w", 20)
     c_15m_task = fetch_crypto_klines(session, sym, "15m", 25)
     c_1h_task = fetch_crypto_klines(session, sym, "1h", 25)
-    c_1w_task = fetch_crypto_klines(session, sym, "1w", 20)
     c_1M_task = fetch_crypto_klines(session, sym, "1M", 15)
     btc_pair_task = fetch_crypto_klines(session, item["btc_pair"], "4h", 30) if item["btc_pair"] else None
     fund_task = fetch_funding_rate_value(session, sym)
 
-    tasks = [c_4h_task, c_1d_task, c_15m_task, c_1h_task, c_1w_task, c_1M_task, fund_task]
+    tasks = [c_4h_task, c_1d_task, c_1w_task, c_15m_task, c_1h_task, c_1M_task, fund_task]
     if btc_pair_task:
         tasks.append(btc_pair_task)
 
     results = await asyncio.gather(*tasks)
-    c_4h, c_1d, c_15m, c_1h, c_1w, c_1M, fund_val = results[:7]
+    c_4h, c_1d, c_1w, c_15m, c_1h, c_1M, fund_val = results[:7]
     b_c = results[7] if btc_pair_task else None
 
     if not c_4h:
@@ -435,7 +441,11 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     rsis_4h = calculate_rsi_series(c_closes)
     rsi_val_4h = rsis_4h[-1] if rsis_4h else 50.0
 
-    s_str, r_str = calculate_daily_sr(c_1d, cur_p)
+    # 3 KADEMELİ DESTEK VE DİRENÇLER: 4s (Yakın), 1G (Ana), 1H (Haftalık Kale)
+    s_4h, r_4h = calculate_sr_from_candles(c_4h, cur_p)
+    s_1d, r_1d = calculate_sr_from_candles(c_1d, cur_p)
+    s_1w, r_1w = calculate_sr_from_candles(c_1w, cur_p)
+
     divergence_msg = check_rsi_divergence(c_closes, rsis_4h)
     spike_msg = check_volume_spike(c_4h)
     fund_human_text = format_funding_human(fund_val)
@@ -484,9 +494,10 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
 
     return (
         f"💎 <b>{item['name']}</b>\n"
-        f"💰 Fiyat: <code>${cur_p:,.4f}</code> | RSI (4s): <b>{rsi_val_4h:.1f}</b>\n"
+        f"💰 Fiyat: <code>{format_clean_price(cur_p)}</code> | RSI (4s): <b>{rsi_val_4h:.1f}</b>\n"
         f"📈 <b>6 Zaman Dilimi:</b> {' | '.join(tf_results)}\n"
-        f"🛡️ Destek (Günlük): <code>{s_str}</code> | 🎯 Direnç: <code>{r_str}</code>\n"
+        f"🛡️ <b>Destek:</b> {s_4h} (4s) | {s_1d} (1G) | {s_1w} (1H)\n"
+        f"🎯 <b>Direnç:</b> {r_4h} (4s) | {r_1d} (1G) | {r_1w} (1H)\n"
         f"⚡ <b>BTC Paritesi:</b> {parity_text} ({b_sig})\n"
         f"📊 <b>Piyasa Pozisyonu:</b> {fund_human_text}\n"
         f"💬 {p_note}{alert_block}\n"
@@ -494,7 +505,6 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
 
 async def build_full_report():
     async with aiohttp.ClientSession() as session:
-        # Piyasa genel verileri ve Makro Takvimi paralel çek
         btc_c, btcd_val, fear_greed, btc_fund_val, macro_events = await asyncio.gather(
             fetch_crypto_klines(session, "BTCUSDT", "4h", 35),
             fetch_btc_dominance(session),
@@ -513,7 +523,6 @@ async def build_full_report():
         dom_note = "⚠️ <b>Dominans Yüksek:</b> Likidite BTC'de toplanıyor." if btcd_val > 56 else "🚀 <b>Dominans Dengede:</b> Altcoinlere alan açılıyor."
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-        # Kısa Makro Hatırlatma (En yakın 2 kritik veri)
         macro_quick_lines = []
         if macro_events:
             for mev in macro_events[:2]:
@@ -601,7 +610,7 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
 async def send_market_report(chat_id):
-    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nTüm pariteler ve makro göstergeler taranıyor...")
+    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nTüm zaman dilimleri (4s, 1G, 1H) paralel taranıyor...")
     try:
         cards = await build_full_report()
         for card in cards:
@@ -636,8 +645,8 @@ async def cmd_start(message: Message):
     
     help_text = (
         "🚀 <b>Kripto İstihbarat & Makro Terminali Aktif!</b>\n\n"
-        "• <b>/analiz:</b> Teknik göstergeler ve piyasa pozisyon raporu.\n"
-        "• <b>/makro:</b> Bu haftaki kritik ABD verileri (FED, İstihdam, TÜFE).\n"
+        "• <b>/analiz:</b> 4s, Günlük ve Haftalık seviyeli piyasa raporu.\n"
+        "• <b>/makro:</b> Bu haftaki kritik ABD verileri (FED, İstihdam, Enflasyon).\n"
         "• <b>/haberler:</b> En güncel sıcak kripto ve makro haberler.\n"
         "• <b>/ekle &lt;coin&gt; | /sil &lt;coin&gt;:</b> Liste yönetimi.\n"
         "• <b>/alarm &lt;coin&gt; &lt;fiyat&gt;:</b> Anlık fiyat alarmı.\n"
