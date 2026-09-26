@@ -24,6 +24,10 @@ TARGET_CHAT_ID = None
 logging.basicConfig(level=logging.INFO)
 DB_PATH = "kripto_bot.db"
 
+# Volatilite Takip Hafızası (In-Memory)
+PRICE_HISTORY = {}        # symbol -> [(timestamp, price)]
+LAST_VOLATILITY_ALERT = {} # symbol -> timestamp
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
@@ -54,7 +58,6 @@ MACRO_TRANSLATIONS = {
     "ISM Services PMI": "Hizmet PMI Endeksi 🏢"
 }
 
-# HABER FİLTRELEME KRİTERLERİ
 HIGH_IMPACT_NEWS_KEYWORDS = [
     "sec", "fed", "fomc", "powell", "binance", "cz", "etf", "hack", "exploit",
     "inflation", "cpi", "rate cut", "rate hike", "treasury", "lawsuit", "approval",
@@ -143,7 +146,6 @@ def save_chat_id(chat_id):
 # TÜRKÇE ÇEVİRİ VE HABER FİLTRESİ
 # ==========================================
 async def translate_to_turkish(session, text):
-    """Google Translate ile başlığı anlık Türkçeye çevirir"""
     try:
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tr&dt=t&q={urllib.parse.quote(text)}"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
@@ -422,10 +424,95 @@ async def fetch_filtered_rss_news(session):
     return []
 
 # ==========================================
-# OTOMATİK SICAK HABER BİLDİRİM BEKÇİSİ
+# ANİ FİYAT HAREKETİ (VOLATİLİTE) RADARI
+# ==========================================
+async def check_volatility_spikes_job():
+    """Her 60 saniyede bir son 15 dakikalık ani yükseliş/düşüşleri tarar"""
+    target_id = TARGET_CHAT_ID or get_saved_chat_id()
+    if not target_id:
+        return
+
+    tracked = get_tracked_coins()
+    symbols_to_check = list(set([c["symbol"] for c in tracked] + ["BTCUSDT"]))
+    now = datetime.now().timestamp()
+
+    async with aiohttp.ClientSession() as session:
+        for sym in symbols_to_check:
+            cur_p = await fetch_current_price(session, sym)
+            if not cur_p:
+                continue
+
+            if sym not in PRICE_HISTORY:
+                PRICE_HISTORY[sym] = []
+
+            PRICE_HISTORY[sym].append((now, cur_p))
+            # 15 dakikadan (900 sn) eski verileri temizle
+            PRICE_HISTORY[sym] = [(t, p) for t, p in PRICE_HISTORY[sym] if now - t <= 900]
+
+            if len(PRICE_HISTORY[sym]) < 2:
+                continue
+
+            # 30 dakika spam koruması (Cooldown)
+            if now - LAST_VOLATILITY_ALERT.get(sym, 0) < 1800:
+                continue
+
+            prices = [p for t, p in PRICE_HISTORY[sym]]
+            min_p = min(prices)
+            max_p = max(prices)
+
+            # Eşik: BTC ve ETH için %2.5, altcoinler için %5.0
+            threshold = 2.5 if sym in ["BTCUSDT", "ETHUSDT"] else 5.0
+
+            pump_pct = ((cur_p - min_p) / min_p) * 100
+            dump_pct = ((cur_p - max_p) / max_p) * 100
+
+            coin_name = sym.replace("USDT", "")
+            for c in tracked:
+                if c["symbol"] == sym:
+                    coin_name = c["name"]
+                    break
+            if sym == "BTCUSDT":
+                coin_name = "BITCOIN (BTC)"
+
+            triggered = False
+            msg = ""
+
+            if pump_pct >= threshold:
+                triggered = True
+                LAST_VOLATILITY_ALERT[sym] = now
+                msg = (
+                    f"🚨 <b>ANİ FİYAT HAREKETİ (PUMP) | 15 DK</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>{coin_name}</b> sert yükseliyor! 🚀\n\n"
+                    f"📈 <b>Değişim:</b> <code>+%{pump_pct:.2f}</code>\n"
+                    f"💰 <b>Güncel Fiyat:</b> <code>{format_clean_price(cur_p)}</code>\n"
+                    f"🎯 <b>15 dk İçi Dip:</b> <code>{format_clean_price(min_p)}</code>\n"
+                    f"⚡ <b>Durum:</b> Güçlü Alım Dalgası / Kırılım"
+                )
+            elif dump_pct <= -threshold:
+                triggered = True
+                LAST_VOLATILITY_ALERT[sym] = now
+                msg = (
+                    f"🚨 <b>ANİ FİYAT HAREKETİ (DUMP) | 15 DK</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>{coin_name}</b> sert düşüyor! 📉\n\n"
+                    f"📉 <b>Değişim:</b> <code>%{dump_pct:.2f}</code>\n"
+                    f"💰 <b>Güncel Fiyat:</b> <code>{format_clean_price(cur_p)}</code>\n"
+                    f"🎯 <b>15 dk İçi Tepe:</b> <code>{format_clean_price(max_p)}</code>\n"
+                    f"⚡ <b>Durum:</b> Sert Satış Dalgası / Tasfiye"
+                )
+
+            if triggered and msg:
+                try:
+                    await bot.send_message(target_id, msg)
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    logging.error(f"Volatilite alert iletim hatası: {e}")
+
+# ==========================================
+# SICAK HABER BİLDİRİM BEKÇİSİ
 # ==========================================
 async def check_breaking_news_job():
-    """Her 90 saniyede bir yeni sıcak gelişme var mı kontrol eder ve anında bildirir"""
     target_id = TARGET_CHAT_ID or get_saved_chat_id()
     if not target_id:
         return
@@ -442,7 +529,6 @@ async def check_breaking_news_job():
         cursor.execute("SELECT COUNT(*) FROM sent_news")
         count = cursor.fetchone()[0]
 
-        # Bot ilk kez çalışıyorsa mevcut haberleri kaydet, spam yapma
         if count == 0:
             for item in news_items:
                 cursor.execute("INSERT OR IGNORE INTO sent_news (link) VALUES (?)", (item["link"],))
@@ -459,7 +545,6 @@ async def check_breaking_news_job():
                 cursor.execute("INSERT INTO sent_news (link) VALUES (?)", (link,))
                 conn.commit()
 
-                # Başlığı Türkçeye çevir
                 tr_title = await translate_to_turkish(session, title)
                 msg = (
                     f"🚨 <b>KRİPTO SICAK GELİŞME | SON DAKİKA</b>\n"
@@ -472,7 +557,7 @@ async def check_breaking_news_job():
                     await bot.send_message(target_id, msg, disable_web_page_preview=True)
                     await asyncio.sleep(1)
                 except Exception as e:
-                    logging.error(f"Son dakika mesaj hatası: {e}")
+                    logging.error(f"Haber bildirim hatası: {e}")
 
     conn.close()
 
@@ -677,7 +762,7 @@ async def build_full_report():
         return cards
 
 # ==========================================
-# ALARM DÖNGÜSÜ
+# HEDEF FİYAT ALARM DÖNGÜSÜ
 # ==========================================
 async def check_price_alarms_job():
     conn = sqlite3.connect(DB_PATH)
@@ -771,7 +856,9 @@ async def cmd_start(message: Message):
         "• <b>/ekle &lt;coin&gt; | /sil &lt;coin&gt;:</b> Liste yönetimi.\n"
         "• <b>/alarm &lt;coin&gt; &lt;fiyat&gt;:</b> Anlık fiyat alarmı.\n"
         "• <b>/liste:</b> Aktif listeni ve kurulan alarmları gösterir.\n\n"
-        "🚨 <b>Önemli Haber Bekçisi:</b> Piyasayı sallayacak bir gelişme olduğunda bot anında bildirim atar.\n"
+        "🚨 <b>Otomatik Radarlar Devrede:</b>\n"
+        "• 15 dakikalık ani pump/dump hareketleri (BTC/ETH $\\pm\\%2.5$, Altcoinler $\\pm\\%5.0$)\n"
+        "• Sıcak piyasa haberleri anında iletilir.\n"
         "⏰ Her saatin <b>:30 geçesinde</b> otomatik rapor iletilecektir."
     )
     await message.answer(help_text, reply_markup=keyboard)
@@ -973,12 +1060,15 @@ async def web_health_check(request):
 async def main():
     init_db()
 
-    # Saatlik Analiz (:30'da)
+    # 1. Saatlik Analiz (:30'da)
     scheduler.add_job(scheduled_report_job, 'cron', minute=30)
-    # Hızlı Fiyat Alarmı Bekçisi (Her 40 saniyede bir)
+    # 2. Hedef Fiyat Alarmı Bekçisi (Her 40 saniyede bir)
     scheduler.add_job(check_price_alarms_job, 'interval', seconds=40)
-    # Otomatik Sıcak Haber Bekçisi (Her 90 saniyede bir)
+    # 3. Otomatik Sıcak Haber Bekçisi (Her 90 saniyede bir)
     scheduler.add_job(check_breaking_news_job, 'interval', seconds=90)
+    # 4. Ani Fiyat Hareketi (Volatilite) Radarı (Her 60 saniyede bir)
+    scheduler.add_job(check_volatility_spikes_job, 'interval', seconds=60)
+    
     scheduler.start()
 
     app = web.Application()
