@@ -43,10 +43,9 @@ HEADERS = {
 }
 
 # ==========================================
-# TEKNİK ANALİZ VE İNDİKATÖR FONKSİYONLARI
+# MATEMATİKSEL VE TEKNİK ANALİZ
 # ==========================================
 def calculate_rsi_series(closes, period=14):
-    """Her mum için RSI serisi üretir"""
     if len(closes) < period + 1:
         return [50.0] * len(closes)
     rsis = [50.0] * period
@@ -67,7 +66,6 @@ def calculate_rsi_series(closes, period=14):
     return rsis
 
 def check_rsi_divergence(closes, rsis):
-    """RSI ve Fiyat arasındaki uyumsuzlukları (Divergence) tespit eder"""
     if len(closes) < 20 or len(rsis) < 20:
         return None
     recent_c = closes[-6:]
@@ -80,17 +78,14 @@ def check_rsi_divergence(closes, rsis):
     min_c_rec, min_c_prev = min(recent_c), min(prev_c)
     min_r_rec, min_r_prev = min(recent_r), min(prev_r)
 
-    # Negatif Uyumsuzluk (Fiyat yükselirken RSI düşüyor)
     if max_c_rec > max_c_prev * 1.008 and max_r_rec < max_r_prev - 3.5:
-        return "⚠️ <b>Negatif RSI Uyumsuzluğu:</b> Fiyat yeni tepe yaptı ama momentum zayıfladı (Düzeltme riski)."
+        return "⚠️ <b>Negatif RSI Uyumsuzluğu:</b> Fiyat yükseldi fakat momentum zayıfladı (Düzeltme riski)."
     
-    # Pozitif Uyumsuzluk (Fiyat düşerken RSI yükseliyor)
     if min_c_rec < min_c_prev * 0.992 and min_r_rec > min_r_prev + 3.5:
-        return "🚀 <b>Pozitif RSI Uyumsuzluğu:</b> Fiyat yeni dip yaptı ama momentum güçlendi (Tepki yükselişi potansiyeli)."
+        return "🚀 <b>Pozitif RSI Uyumsuzluğu:</b> Fiyat düştü fakat momentum güçlendi (Tepki yükselişi potansiyeli)."
     return None
 
 def check_volume_spike(candles):
-    """Son tamamlanan mumda hacim patlaması var mı kontrol eder"""
     if len(candles) < 18:
         return None
     volumes = [float(c[5]) for c in candles]
@@ -126,22 +121,53 @@ def evaluate_signal(closes, rsi_val):
         return "🔴 SAT"
     return "⚪ NÖTR"
 
-def calculate_dynamic_sr(candles, current_price):
-    if len(candles) < 2:
+def calculate_daily_sr(daily_candles, current_price):
+    """Günlük (1G) mumları baz alarak gerçekçi Destek ve Direnç seviyelerini hesaplar"""
+    if not daily_candles or len(daily_candles) < 2:
         return "—", "—"
-    prev = candles[-2]
-    h, l, c = float(prev[2]), float(prev[3]), float(prev[4])
-    p = (h + l + c) / 3
-    r1, s1 = (2 * p) - l, (2 * p) - h
-    r2, s2 = p + (h - l), p - (h - l)
+    
+    # Tamamlanmış son günün mumu
+    prev_day = daily_candles[-2]
+    high = float(prev_day[2])
+    low = float(prev_day[3])
+    close = float(prev_day[4])
+
+    pivot = (high + low + close) / 3
+    r1 = (2 * pivot) - low
+    s1 = (2 * pivot) - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+
     if current_price >= r1:
-        return f"${r1:,.4f}", f"${r2:,.4f}"
+        support_val, resistance_val = r1, r2
     elif current_price <= s1:
-        return f"${s2:,.4f}", f"${s1:,.4f}"
-    return f"${s1:,.4f}", f"${r1:,.4f}"
+        support_val, resistance_val = s2, s1
+    else:
+        support_val, resistance_val = s1, r1
+
+    return f"${support_val:,.4f}", f"${resistance_val:,.4f}"
+
+def format_funding_human(rate_val):
+    """Vadeli fonlama oranını herkesin anlayabileceği sözel piyasa durumuna çevirir"""
+    if rate_val is None:
+        return "Veri Yok"
+    
+    perc_str = f"(%{rate_val:+.4f})"
+    if rate_val >= 0.035:
+        return f"⚠️ Aşırı Long {perc_str} — Düzeltme Riski"
+    elif rate_val > 0.015:
+        return f"📈 Long Ağırlıklı {perc_str} — Alıcılar Baskın"
+    elif rate_val >= 0.005:
+        return f"⚖️ Dengeli / Nötr {perc_str}"
+    elif rate_val > -0.010:
+        return f"📉 Temkinli {perc_str} — Satıcı Eğilimli"
+    elif rate_val >= -0.030:
+        return f"🔻 Short Ağırlıklı {perc_str} — Düşüş Beklentisi"
+    else:
+        return f"🔥 Aşırı Short {perc_str} — Ani Yükseliş (Squeeze) Riski"
 
 # ==========================================
-# VERİ ÇEKME MOTORU (API'ler)
+# VERİ ÇEKME MOTORU
 # ==========================================
 async def fetch_crypto_klines(session, symbol, interval, limit=35):
     endpoints = [
@@ -161,7 +187,6 @@ async def fetch_crypto_klines(session, symbol, interval, limit=35):
     return None
 
 async def fetch_fear_and_greed(session):
-    """Piyasa Korku ve Açgözlülük Endeksini Çeker"""
     try:
         async with session.get("https://api.alternative.me/fng/?limit=1", headers=HEADERS, timeout=4) as resp:
             if resp.status == 200:
@@ -180,8 +205,7 @@ async def fetch_fear_and_greed(session):
         pass
     return "Veri Alınamadı"
 
-async def fetch_funding_rate(session, symbol):
-    """Binance Vadeli Fonlama Oranını Çeker"""
+async def fetch_funding_rate_value(session, symbol):
     urls = [
         f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}",
         f"https://contract.mexc.com/api/v1/contract/funding_rate/{symbol.replace('USDT', '_USDT')}"
@@ -191,21 +215,13 @@ async def fetch_funding_rate(session, symbol):
             async with session.get(url, headers=HEADERS, timeout=3) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    rate_val = None
                     if "lastFundingRate" in data:
-                        rate_val = float(data["lastFundingRate"]) * 100
+                        return float(data["lastFundingRate"]) * 100
                     elif "data" in data and "fundingRate" in data["data"]:
-                        rate_val = float(data["data"]["fundingRate"]) * 100
-                    
-                    if rate_val is not None:
-                        if rate_val >= 0.035:
-                            return f"<code>%{rate_val:+.4f}</code> (⚠️ Aşırı Long)"
-                        elif rate_val <= -0.02:
-                            return f"<code>%{rate_val:+.4f}</code> (🔥 Aşırı Short)"
-                        return f"<code>%{rate_val:+.4f}</code>"
+                        return float(data["data"]["fundingRate"]) * 100
         except Exception:
             continue
-    return "—"
+    return None
 
 async def fetch_btc_dominance(session):
     try:
@@ -222,7 +238,7 @@ async def fetch_btc_dominance(session):
 # ==========================================
 async def build_full_report():
     async with aiohttp.ClientSession() as session:
-        # Piyasa Genel Göstergeleri
+        # 1. Bitcoin & Piyasa Durumu
         btc_c = await fetch_crypto_klines(session, "BTCUSDT", "4h", 35)
         btc_price = float(btc_c[-1][4]) if btc_c else 0.0
         btc_closes = [float(c[4]) for c in btc_c] if btc_c else []
@@ -232,7 +248,8 @@ async def build_full_report():
         
         btcd_val = await fetch_btc_dominance(session)
         fear_greed = await fetch_fear_and_greed(session)
-        btc_funding = await fetch_funding_rate(session, "BTCUSDT")
+        btc_fund_val = await fetch_funding_rate_value(session, "BTCUSDT")
+        btc_fund_text = format_funding_human(btc_fund_val)
 
         dom_note = "⚠️ <b>Dominans Yüksek:</b> Likidite BTC'de toplanıyor." if btcd_val > 56 else "🚀 <b>Dominans Dengede:</b> Altcoinlere alan açılıyor."
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -241,14 +258,15 @@ async def build_full_report():
             f"📊 <b>PİYASA İSTİHBARAT RAPORU | {now_str}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🪙 <b>Bitcoin (BTC):</b> <code>${btc_price:,.2f}</code> | RSI (4s): <b>{btc_rsi:.1f}</b>\n"
-            f"🎯 Sinyal (4s): <b>{btc_sig}</b> | Fonlama: {btc_funding}\n\n"
+            f"🎯 Sinyal (4s): <b>{btc_sig}</b>\n"
+            f"📈 <b>Piyasa Pozisyonu:</b> {btc_fund_text}\n\n"
             f"🎭 <b>Korku/Açgözlülük:</b> <b>{fear_greed}</b>\n"
-            f"📈 <b>BTC Dominansı:</b> <code>%{btcd_val:.2f}</code>\n"
+            f"📊 <b>BTC Dominansı:</b> <code>%{btcd_val:.2f}</code>\n"
             f"💡 {dom_note}\n"
         )
         cards = [header]
 
-        # Altcoin Kartları
+        # 2. Altcoin Kartları
         for item in TRACKED_COINS:
             c_4h = await fetch_crypto_klines(session, item["symbol"], "4h", 35)
             if not c_4h:
@@ -258,13 +276,20 @@ async def build_full_report():
             c_closes = [float(c[4]) for c in c_4h]
             rsis_4h = calculate_rsi_series(c_closes)
             rsi_val_4h = rsis_4h[-1]
-            s_str, r_str = calculate_dynamic_sr(c_4h, cur_p)
+
+            # GÜNLÜK (1G) DESTEK VE DİRENÇLER
+            daily_candles = await fetch_crypto_klines(session, item["symbol"], "1d", 15)
+            s_str, r_str = calculate_daily_sr(daily_candles, cur_p)
             
             # Anomali Dedektörleri
             divergence_msg = check_rsi_divergence(c_closes, rsis_4h)
             spike_msg = check_volume_spike(c_4h)
-            funding_rate = await fetch_funding_rate(session, item["symbol"])
+            
+            # Sözel Vadeli Fonlama
+            fund_val = await fetch_funding_rate_value(session, item["symbol"])
+            fund_human_text = format_funding_human(fund_val)
 
+            # 6 Zaman Dilimi Taraması
             tf_results = []
             for lbl, inter in TIMEFRAMES:
                 if inter == "4h":
@@ -279,18 +304,30 @@ async def build_full_report():
                         sig = "⚪"
                 tf_results.append(f"{lbl}:{'🟢' if 'AL' in sig else ('🔴' if 'SAT' in sig else '⚪')}")
 
-            # BTC Parite Oranı
+            # BTC Parite Oranı ve Sinyali
             if item["btc_pair"]:
-                b_c = await fetch_crypto_klines(session, item["btc_pair"], "4h", 25)
-                b_ratio = float(b_c[-1][4]) if b_c else 0
-                b_closes = [float(c[4]) for c in b_c] if b_c else []
-                b_rsi = calculate_rsi_series(b_closes)[-1] if b_closes else 50.0
-                b_sig = evaluate_signal(b_closes, b_rsi) if b_closes else "⚪ NÖTR"
-                parity_text = f"<code>{b_ratio:.8f} BTC</code>"
+                b_c = await fetch_crypto_klines(session, item["btc_pair"], "4h", 30)
+                if b_c:
+                    b_ratio = float(b_c[-1][4])
+                    b_closes = [float(c[4]) for c in b_c]
+                    b_rsi = calculate_rsi_series(b_closes)[-1]
+                    b_sig = evaluate_signal(b_closes, b_rsi)
+                    parity_text = f"<code>{b_ratio:.8f} BTC</code>"
+                else:
+                    parity_text = "Veri Yok"
+                    b_sig = "⚪ NÖTR"
             else:
-                synth = (cur_p / btc_price) if btc_price > 0 else 0
-                parity_text = f"<code>{synth:.8f} BTC</code> (Sentetik)"
-                b_sig = "⚡ Sentetik"
+                # Sentetik BTC Paritesi İçin Geçmiş Mumları Oranlama ve Gerçek Sinyal Üretme
+                if btc_c and len(btc_c) > 0 and btc_price > 0:
+                    min_len = min(len(c_4h), len(btc_c))
+                    synth_closes = [float(c_4h[-min_len + i][4]) / float(btc_c[-min_len + i][4]) for i in range(min_len)]
+                    synth_rsis = calculate_rsi_series(synth_closes)
+                    b_sig = evaluate_signal(synth_closes, synth_rsis[-1])
+                    synth_ratio = cur_p / btc_price
+                    parity_text = f"<code>{synth_ratio:.8f} BTC</code> (Sentetik)"
+                else:
+                    parity_text = "—"
+                    b_sig = "⚪ NÖTR"
 
             p_note = "🔥 BTC'den Güçlü" if "AL" in b_sig else ("❄️ BTC'den Zayıf" if "SAT" in b_sig else "⚖️ BTC ile Paralel")
 
@@ -305,9 +342,9 @@ async def build_full_report():
                 f"💎 <b>{item['name']}</b>\n"
                 f"💰 Fiyat: <code>${cur_p:,.4f}</code> | RSI (4s): <b>{rsi_val_4h:.1f}</b>\n"
                 f"📈 <b>6 Zaman Dilimi:</b> {' | '.join(tf_results)}\n"
-                f"🛡️ Destek: <code>{s_str}</code> | 🎯 Direnç: <code>{r_str}</code>\n"
-                f"⚡ <b>BTC Oranı:</b> {parity_text} ({b_sig})\n"
-                f"📊 <b>Vadeli Fonlama:</b> {funding_rate}\n"
+                f"🛡️ Destek (Günlük): <code>{s_str}</code> | 🎯 Direnç: <code>{r_str}</code>\n"
+                f"⚡ <b>BTC Paritesi:</b> {parity_text} ({b_sig})\n"
+                f"📊 <b>Piyasa Pozisyonu:</b> {fund_human_text}\n"
                 f"💬 {p_note}{alert_block}\n"
             )
             cards.append(card)
@@ -322,7 +359,7 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
 async def send_market_report(chat_id):
-    await bot.send_message(chat_id, "⏳ <b>Gelişmiş Piyasa Verileri Taranıyor...</b>\nFonlama oranları, hacim anomalileri ve uyumsuzluklar kontrol ediliyor.")
+    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nGünlük destek/dirençler ve pozisyon yığılmaları taranıyor.")
     cards = await build_full_report()
     for card in cards:
         await bot.send_message(chat_id, card)
@@ -341,7 +378,7 @@ async def cmd_start(message: Message):
     global TARGET_CHAT_ID
     TARGET_CHAT_ID = message.chat.id
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Şimdi Analiz Raporu Al", callback_data="btn_run_analysis")]])
-    await message.answer("🚀 <b>Piyasa İstihbarat Terminali Aktif!</b>\n\n• Vadeli Fonlama Oranları\n• Korku & Açgözlülük Endeksi\n• Hacim Patlamaları & RSI Uyumsuzlukları devrede.\n\nHer saat :30 geçe otomatik bildirim gelecektir.", reply_markup=keyboard)
+    await message.answer("🚀 <b>Piyasa İstihbarat Terminali Aktif!</b>\n\n• Günlük Destek / Dirençler\n• Sözel Pozisyon Raporları\n• Sentetik Sinyal Motoru devrede.\n\nHer saat :30 geçe otomatik bildirim gelecektir.", reply_markup=keyboard)
 
 @dp.message(Command("analiz"))
 async def cmd_analiz(message: Message):
