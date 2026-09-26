@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 import aiohttp
@@ -53,6 +54,21 @@ MACRO_TRANSLATIONS = {
     "ISM Services PMI": "Hizmet PMI Endeksi 🏢"
 }
 
+# HABER FİLTRELEME KRİTERLERİ
+HIGH_IMPACT_NEWS_KEYWORDS = [
+    "sec", "fed", "fomc", "powell", "binance", "cz", "etf", "hack", "exploit",
+    "inflation", "cpi", "rate cut", "rate hike", "treasury", "lawsuit", "approval",
+    "approved", "halt", "crash", "surge", "all-time high", "ath", "liquidation"
+]
+TRACKED_COIN_KEYWORDS = [
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+    "bittensor", "tao", "celestia", "tia", "arkham", "arkm", "fetch.ai", "fet"
+]
+IGNORE_NEWS_PHRASES = [
+    "here's what happened", "price analysis", "price prediction", "weekly recap",
+    "market wrap", "digest", "podcast", "interview", "opinion:"
+]
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -76,6 +92,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS bot_settings (
             key TEXT PRIMARY KEY,
             value TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sent_news (
+            link TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -116,6 +138,32 @@ def save_chat_id(chat_id):
     cursor.execute("INSERT OR REPLACE INTO bot_settings VALUES ('target_chat_id', ?)", (str(chat_id),))
     conn.commit()
     conn.close()
+
+# ==========================================
+# TÜRKÇE ÇEVİRİ VE HABER FİLTRESİ
+# ==========================================
+async def translate_to_turkish(session, text):
+    """Google Translate ile başlığı anlık Türkçeye çevirir"""
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tr&dt=t&q={urllib.parse.quote(text)}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data and isinstance(data, list) and len(data) > 0 and data[0]:
+                    return "".join([part[0] for part in data[0] if part[0]]).strip()
+    except Exception:
+        pass
+    return text
+
+def is_news_relevant(title):
+    t_lower = title.lower()
+    if any(ign in t_lower for ign in IGNORE_NEWS_PHRASES):
+        return False
+    if any(kw in t_lower for kw in HIGH_IMPACT_NEWS_KEYWORDS):
+        return True
+    if any(tc in t_lower for tc in TRACKED_COIN_KEYWORDS):
+        return True
+    return False
 
 # ==========================================
 # TEKNİK ANALİZ MATEMATİĞİ
@@ -331,9 +379,6 @@ async def fetch_btc_dominance(session):
         pass
     return 58.30
 
-# ==========================================
-# MAKRO EKONOMİK VERİ VE HABER MOTORU
-# ==========================================
 async def fetch_macro_calendar(session):
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     try:
@@ -353,7 +398,7 @@ async def fetch_macro_calendar(session):
         logging.warning(f"Makro takvim cekilemedi: {e}")
     return []
 
-async def fetch_latest_crypto_news(session, limit=5):
+async def fetch_filtered_rss_news(session):
     url = "https://cointelegraph.com/rss"
     try:
         async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
@@ -362,19 +407,74 @@ async def fetch_latest_crypto_news(session, limit=5):
                 root = ET.fromstring(raw_xml)
                 channel = root.find("channel")
                 items = channel.findall("item") if channel is not None else []
-                news_list = []
-                for it in items[:limit]:
+                valid_items = []
+                for it in items:
                     title_elem = it.find("title")
                     link_elem = it.find("link")
                     if title_elem is not None and link_elem is not None:
-                        news_list.append({
-                            "title": title_elem.text.strip(),
-                            "link": link_elem.text.strip()
-                        })
-                return news_list
+                        t_text = title_elem.text.strip()
+                        l_text = link_elem.text.strip()
+                        if is_news_relevant(t_text):
+                            valid_items.append({"title": t_text, "link": l_text})
+                return valid_items
     except Exception as e:
         logging.warning(f"Haber akisi alinamadi: {e}")
     return []
+
+# ==========================================
+# OTOMATİK SICAK HABER BİLDİRİM BEKÇİSİ
+# ==========================================
+async def check_breaking_news_job():
+    """Her 90 saniyede bir yeni sıcak gelişme var mı kontrol eder ve anında bildirir"""
+    target_id = TARGET_CHAT_ID or get_saved_chat_id()
+    if not target_id:
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    async with aiohttp.ClientSession() as session:
+        news_items = await fetch_filtered_rss_news(session)
+        if not news_items:
+            conn.close()
+            return
+
+        cursor.execute("SELECT COUNT(*) FROM sent_news")
+        count = cursor.fetchone()[0]
+
+        # Bot ilk kez çalışıyorsa mevcut haberleri kaydet, spam yapma
+        if count == 0:
+            for item in news_items:
+                cursor.execute("INSERT OR IGNORE INTO sent_news (link) VALUES (?)", (item["link"],))
+            conn.commit()
+            conn.close()
+            return
+
+        for item in reversed(news_items[:6]):
+            link = item["link"]
+            title = item["title"]
+
+            cursor.execute("SELECT 1 FROM sent_news WHERE link = ?", (link,))
+            if not cursor.fetchone():
+                cursor.execute("INSERT INTO sent_news (link) VALUES (?)", (link,))
+                conn.commit()
+
+                # Başlığı Türkçeye çevir
+                tr_title = await translate_to_turkish(session, title)
+                msg = (
+                    f"🚨 <b>KRİPTO SICAK GELİŞME | SON DAKİKA</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📢 <b>{tr_title}</b>\n\n"
+                    f"🌐 <i>Orijinal: {title}</i>\n"
+                    f"🔗 <a href='{link}'>Haberi Görüntüle (Cointelegraph)</a>"
+                )
+                try:
+                    await bot.send_message(target_id, msg, disable_web_page_preview=True)
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logging.error(f"Son dakika mesaj hatası: {e}")
+
+    conn.close()
 
 def format_macro_report(events):
     if not events:
@@ -410,7 +510,7 @@ def format_macro_report(events):
     return "🏦 <b>ABD MAKRO EKONOMİ & FED TAKVİMİ (Bu Hafta)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(lines) + "\n" + cheat_sheet
 
 # ==========================================
-# RAPOR MOTORU (BAĞIMSIZ DOLAR SİNYALİ ENTEGRELİ)
+# RAPOR MOTORU
 # ==========================================
 async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     sym = item["symbol"]
@@ -439,10 +539,7 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     rsis_4h = calculate_rsi_series(c_closes)
     rsi_val_4h = rsis_4h[-1] if rsis_4h else 50.0
 
-    # 1. BAĞIMSIZ DOLAR (USDT) SİNYALİ
     usdt_sig = evaluate_signal(c_closes, rsi_val_4h)
-
-    # 3 Kademeli Destek ve Dirençler (4s, 1G, 1H)
     s_4h, r_4h = calculate_sr_from_candles(c_4h, cur_p)
     s_1d, r_1d = calculate_sr_from_candles(c_1d, cur_p)
     s_1w, r_1w = calculate_sr_from_candles(c_1w, cur_p)
@@ -451,7 +548,6 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     spike_msg = check_volume_spike(c_4h)
     fund_human_text = format_funding_human(fund_val)
 
-    # 6 Zaman Dilimi Taraması
     tf_data_map = {"15d": c_15m, "1s": c_1h, "4s": c_4h, "1G": c_1d, "1H": c_1w, "1A": c_1M}
     tf_results = []
     for lbl, _ in TIMEFRAMES:
@@ -464,7 +560,6 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
             sig = "⚪"
         tf_results.append(f"{lbl}:{'🟢' if 'AL' in sig else ('🔴' if 'SAT' in sig else '⚪')}")
 
-    # 2. BTC İLE GÖRECELİ GÜÇ KIYASLAMASI
     if item["btc_pair"]:
         if b_c:
             b_ratio = float(b_c[-1][4])
@@ -494,7 +589,6 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     else:
         btc_badge = "⚖️ BTC ile Paralel"
 
-    # 3. AKILLI SENTEZ YORUMU (Dolar Yönü + BTC Gücü Harmanı)
     if "AL" in usdt_sig and "AL" in b_sig:
         p_note = "🚀 Hem dolar bazında yükselişte hem de BTC'den daha hızlı koşuyor."
     elif "AL" in usdt_sig and "SAT" in b_sig:
@@ -673,10 +767,11 @@ async def cmd_start(message: Message):
         "🚀 <b>Kripto İstihbarat & Makro Terminali Aktif!</b>\n\n"
         "• <b>/analiz:</b> Bağımsız Dolar Sinyali & 3 Kademeli S/R seviyeleri.\n"
         "• <b>/makro:</b> Bu haftaki kritik ABD verileri (FED, İstihdam, Enflasyon).\n"
-        "• <b>/haberler:</b> En güncel sıcak kripto ve makro haberler.\n"
+        "• <b>/haberler:</b> Filtrelenmiş sıcak kripto haberleri (Türkçe).\n"
         "• <b>/ekle &lt;coin&gt; | /sil &lt;coin&gt;:</b> Liste yönetimi.\n"
         "• <b>/alarm &lt;coin&gt; &lt;fiyat&gt;:</b> Anlık fiyat alarmı.\n"
         "• <b>/liste:</b> Aktif listeni ve kurulan alarmları gösterir.\n\n"
+        "🚨 <b>Önemli Haber Bekçisi:</b> Piyasayı sallayacak bir gelişme olduğunda bot anında bildirim atar.\n"
         "⏰ Her saatin <b>:30 geçesinde</b> otomatik rapor iletilecektir."
     )
     await message.answer(help_text, reply_markup=keyboard)
@@ -695,17 +790,17 @@ async def cmd_makro(message: Message):
 
 @dp.message(Command("haberler"))
 async def cmd_haberler(message: Message):
-    await message.answer("⏳ <i>Son dakika haber akışı taranıyor...</i>")
+    await message.answer("⏳ <i>Sıcak gelişmeler taranıyor ve Türkçeye çevriliyor...</i>")
     async with aiohttp.ClientSession() as session:
-        news = await fetch_latest_crypto_news(session, limit=5)
+        news = await fetch_filtered_rss_news(session)
+        if not news:
+            await message.answer("ℹ️ <i>Şu anda piyasayı etkileyecek acil bir haber bulunmuyor.</i>")
+            return
 
-    if not news:
-        await message.answer("ℹ️ <i>Şu anda yeni bir haber akışı çekilemedi.</i>")
-        return
-
-    lines = ["📰 <b>KRİPTO & PİYASA SON DAKİKA GELİŞMELERİ</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
-    for i, item in enumerate(news, 1):
-        lines.append(f"<b>{i}.</b> {item['title']}\n🔗 <a href='{item['link']}'>Haberi Görüntüle</a>\n")
+        lines = ["📰 <b>KRİPTO & PİYASA SICAK GELİŞMELERİ</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+        for i, item in enumerate(news[:5], 1):
+            tr_title = await translate_to_turkish(session, item["title"])
+            lines.append(f"<b>{i}.</b> {tr_title}\n🔗 <a href='{item['link']}'>Haberi Oku</a>\n")
 
     await message.answer("\n".join(lines), disable_web_page_preview=True)
 
@@ -878,8 +973,12 @@ async def web_health_check(request):
 async def main():
     init_db()
 
+    # Saatlik Analiz (:30'da)
     scheduler.add_job(scheduled_report_job, 'cron', minute=30)
+    # Hızlı Fiyat Alarmı Bekçisi (Her 40 saniyede bir)
     scheduler.add_job(check_price_alarms_job, 'interval', seconds=40)
+    # Otomatik Sıcak Haber Bekçisi (Her 90 saniyede bir)
+    scheduler.add_job(check_breaking_news_job, 'interval', seconds=90)
     scheduler.start()
 
     app = web.Application()
