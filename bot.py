@@ -2,7 +2,8 @@ import asyncio
 import logging
 import os
 import sqlite3
-from datetime import datetime
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone, timedelta
 import aiohttp
 from aiohttp import web
 
@@ -35,8 +36,25 @@ TIMEFRAMES = [
     ("1A", "1M")
 ]
 
+# ÖNEMLİ ABD MAKRO VERİLERİ ÇEVİRİ TABLOSU
+MACRO_TRANSLATIONS = {
+    "Federal Funds Rate": "FED Faiz Kararı 🏦",
+    "FOMC Statement": "FOMC Faiz Beyanatı 🏦",
+    "FOMC Press Conference": "FED Powell Basın Toplantısı 🎙️",
+    "Non-Farm Employment Change": "Tarım Dışı İstihdam (NFP) 🚜",
+    "Unemployment Rate": "ABD İşsizlik Oranı 👥",
+    "CPI m/m": "TÜFE (Aylık Enflasyon) 🛒",
+    "CPI y/y": "TÜFE (Yıllık Enflasyon) 🛒",
+    "Core CPI m/m": "Çekirdek TÜFE Enflasyonu 🛒",
+    "Core PCE Price Index m/m": "Çekirdek PCE (FED Favori Enflasyon) 🎯",
+    "Advance GDP q/q": "ABD Büyüme (GSYİH) 📊",
+    "PPI m/m": "ÜFE (Üretici Enflasyonu) 🏭",
+    "Retail Sales m/m": "ABD Perakende Satışlar 🛍️",
+    "ISM Manufacturing PMI": "İmalat PMI Endeksi 🏭",
+    "ISM Services PMI": "Hizmet PMI Endeksi 🏢"
+}
+
 def init_db():
-    """Veritabanını ve varsayılan takip listesini hazırlar"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -62,7 +80,6 @@ def init_db():
         )
     """)
 
-    # Eğer takip listesi boşsa varsayılan coinleri yükle
     cursor.execute("SELECT COUNT(*) FROM tracked_coins")
     if cursor.fetchone()[0] == 0:
         default_coins = [
@@ -135,7 +152,7 @@ def check_rsi_divergence(closes, rsis):
     min_r_rec, min_r_prev = min(recent_r), min(prev_r)
 
     if max_c_rec > max_c_prev * 1.008 and max_r_rec < max_r_prev - 3.5:
-        return "⚠️ <b>Negatif RSI Uyumsuzluğu:</b> Fiyat yükseldi fakat momentum zayıfladı (Düzeltme riski)."
+        return "⚠️ <b>Negatif RSI Uyumsuzluğu:</b> Fiyat yeni tepe yaptı fakat momentum zayıfladı (Düzeltme riski)."
     if min_c_rec < min_c_prev * 0.992 and min_r_rec > min_r_prev + 3.5:
         return "🚀 <b>Pozitif RSI Uyumsuzluğu:</b> Fiyat düştü fakat momentum güçlendi (Tepki yükselişi potansiyeli)."
     return None
@@ -210,8 +227,17 @@ def format_funding_human(rate_val):
     else:
         return f"🔥 Aşırı Short {perc_str} — Squeeze (Patlama) Riski"
 
+def format_iso_to_tr_time(iso_str):
+    """ISO formatındaki tarihi Türkiye saatine (UTC+3) çevirir"""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        tr_dt = dt.astimezone(timezone(timedelta(hours=3)))
+        return tr_dt.strftime("%d.%m %H:%M")
+    except Exception:
+        return iso_str[:16].replace("T", " ")
+
 # ==========================================
-# ASYNC VERİ ÇEKME MOTORU
+# ASYNC VERİ ÇEKİCİLERİ
 # ==========================================
 async def fetch_crypto_klines(session, symbol, interval, limit=35):
     if not symbol:
@@ -233,7 +259,6 @@ async def fetch_crypto_klines(session, symbol, interval, limit=35):
     return None
 
 async def fetch_current_price(session, symbol):
-    """Alarm kontrolü için hızlı anlık fiyat çeker"""
     endpoints = [
         f"https://data-api.binance.vision/api/v3/ticker/price?symbol={symbol}",
         f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}",
@@ -296,6 +321,89 @@ async def fetch_btc_dominance(session):
     except Exception:
         pass
     return 58.30
+
+# ==========================================
+# MAKRO EKONOMİK VERİ VE HABER MOTORU
+# ==========================================
+async def fetch_macro_calendar(session):
+    """ForexFactory üzerinden haftalık kritik ABD verilerini çeker"""
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    try:
+        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+            if resp.status == 200:
+                events = await resp.json()
+                usd_high = []
+                for e in events:
+                    if e.get("country") == "USD" and e.get("impact") in ["High", "Medium"]:
+                        title = e.get("title", "")
+                        # Özellikle BTC'yi vuran verileri seç
+                        if any(k in title for k in [
+                            "Non-Farm", "Unemployment", "CPI", "PCE", "Fed", "FOMC", "Rate", "GDP", "PPI", "Retail Sales"
+                        ]):
+                            usd_high.append(e)
+                return usd_high
+    except Exception as e:
+        logging.warning(f"Makro takvim cekilemedi: {e}")
+    return []
+
+async def fetch_latest_crypto_news(session, limit=5):
+    """CoinTelegraph RSS feed üzerinden son sıcak haberleri çeker"""
+    url = "https://cointelegraph.com/rss"
+    try:
+        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+            if resp.status == 200:
+                raw_xml = await resp.text()
+                root = ET.fromstring(raw_xml)
+                channel = root.find("channel")
+                items = channel.findall("item") if channel is not None else []
+                news_list = []
+                for it in items[:limit]:
+                    title_elem = it.find("title")
+                    link_elem = it.find("link")
+                    if title_elem is not None and link_elem is not None:
+                        news_list.append({
+                            "title": title_elem.text.strip(),
+                            "link": link_elem.text.strip()
+                        })
+                return news_list
+    except Exception as e:
+        logging.warning(f"Haber akisi alinamadi: {e}")
+    return []
+
+def format_macro_report(events):
+    """Çekilen makro verileri şık bir mesaja dönüştürür"""
+    if not events:
+        return "📅 <i>Bu hafta için planlanan kritik bir ABD makro verisi bulunmuyor veya takvim henüz güncellenmedi.</i>"
+
+    lines = []
+    for ev in events[:6]:
+        raw_title = ev.get("title", "")
+        tr_name = MACRO_TRANSLATIONS.get(raw_title, raw_title)
+        event_time = format_iso_to_tr_time(ev.get("date", ""))
+        actual = ev.get("actual")
+        forecast = ev.get("forecast")
+        previous = ev.get("previous")
+
+        status_line = ""
+        if actual:
+            status_line = f"📊 <b>Açıklanan:</b> <code>{actual}</code> | <b>Beklenti:</b> {forecast or '—'} | <b>Önceki:</b> {previous or '—'}"
+        else:
+            status_line = f"⏳ <b>Beklenti:</b> <code>{forecast or '—'}</code> | <b>Önceki:</b> <code>{previous or '—'}</code>"
+
+        lines.append(
+            f"📌 <b>{tr_name}</b>\n"
+            f"⏰ <b>Tarih/Saat:</b> <code>{event_time} (TSİ)</code>\n"
+            f"{status_line}\n"
+        )
+
+    cheat_sheet = (
+        "💡 <b>Bitcoin & Kripto Etki Rehberi:</b>\n"
+        "• <b>İstihdam (NFP) & Enflasyon (TÜFE/PCE) Düşük Gelirse:</b> FED faiz indirimine mecbur kalır $\rightarrow$ <b>BTC YÜKSELİR (Boğa) 🚀</b>\n"
+        "• <b>İstihdam & Enflasyon Yüksek Gelirse:</b> Dolar (DXY) güçlenir $\rightarrow$ <b>BTC BASKILANIR 📉</b>\n"
+        "• <b>FED Faiz İndirirse:</b> Küresel likidite artar $\rightarrow$ <b>Piyasa Rallisi Başlar 🔥</b>"
+    )
+
+    return "🏦 <b>ABD MAKRO EKONOMİ & FED TAKVİMİ (Bu Hafta)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(lines) + "\n" + cheat_sheet
 
 # ==========================================
 # RAPOR MOTORU
@@ -386,11 +494,13 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
 
 async def build_full_report():
     async with aiohttp.ClientSession() as session:
-        btc_c, btcd_val, fear_greed, btc_fund_val = await asyncio.gather(
+        # Piyasa genel verileri ve Makro Takvimi paralel çek
+        btc_c, btcd_val, fear_greed, btc_fund_val, macro_events = await asyncio.gather(
             fetch_crypto_klines(session, "BTCUSDT", "4h", 35),
             fetch_btc_dominance(session),
             fetch_fear_and_greed(session),
-            fetch_funding_rate_value(session, "BTCUSDT")
+            fetch_funding_rate_value(session, "BTCUSDT"),
+            fetch_macro_calendar(session)
         )
 
         btc_price = float(btc_c[-1][4]) if btc_c else 0.0
@@ -403,6 +513,15 @@ async def build_full_report():
         dom_note = "⚠️ <b>Dominans Yüksek:</b> Likidite BTC'de toplanıyor." if btcd_val > 56 else "🚀 <b>Dominans Dengede:</b> Altcoinlere alan açılıyor."
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
+        # Kısa Makro Hatırlatma (En yakın 2 kritik veri)
+        macro_quick_lines = []
+        if macro_events:
+            for mev in macro_events[:2]:
+                m_title = MACRO_TRANSLATIONS.get(mev.get("title", ""), mev.get("title", ""))
+                m_time = format_iso_to_tr_time(mev.get("date", ""))
+                macro_quick_lines.append(f"• {m_title} (<code>{m_time}</code>)")
+        macro_quick_text = ("\n🗓️ <b>Yaklaşan ABD Verileri:</b>\n" + "\n".join(macro_quick_lines)) if macro_quick_lines else ""
+
         header = (
             f"📊 <b>PİYASA İSTİHBARAT RAPORU | {now_str}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -411,7 +530,8 @@ async def build_full_report():
             f"📈 <b>Piyasa Pozisyonu:</b> {btc_fund_text}\n\n"
             f"🎭 <b>Korku/Açgözlülük:</b> <b>{fear_greed}</b>\n"
             f"📊 <b>BTC Dominansı:</b> <code>%{btcd_val:.2f}</code>\n"
-            f"💡 {dom_note}\n"
+            f"💡 {dom_note}"
+            f"{macro_quick_text}\n"
         )
         cards = [header]
 
@@ -428,10 +548,9 @@ async def build_full_report():
         return cards
 
 # ==========================================
-# ALARM DÖNGÜSÜ (FİYAT BEKÇİSİ)
+# ALARM DÖNGÜSÜ
 # ==========================================
 async def check_price_alarms_job():
-    """Her 40 saniyede bir bekleyen alarmları kontrol eder"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id, chat_id, symbol, target_price, direction FROM price_alarms")
@@ -467,7 +586,7 @@ async def check_price_alarms_job():
                 try:
                     await bot.send_message(chat_id, msg)
                 except Exception as e:
-                    logging.error(f"Alarm mesaj hatası: {e}")
+                    logging.error(f"Alarm bildirim hatası: {e}")
 
     if triggered_ids:
         cursor.execute(f"DELETE FROM price_alarms WHERE id IN ({','.join(['?']*len(triggered_ids))})", triggered_ids)
@@ -482,7 +601,7 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
 async def send_market_report(chat_id):
-    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nTüm pariteler paralel taranıyor (~3 saniye)...")
+    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nTüm pariteler ve makro göstergeler taranıyor...")
     try:
         cards = await build_full_report()
         for card in cards:
@@ -490,7 +609,7 @@ async def send_market_report(chat_id):
             await asyncio.sleep(0.3)
     except Exception as e:
         logging.error(f"Rapor hatası: {e}", exc_info=True)
-        await bot.send_message(chat_id, f"⚠️ Veri alınırken geçici bir hata oluştu: {e}")
+        await bot.send_message(chat_id, f"⚠️ Veri alınırken hata oluştu: {e}")
 
 async def scheduled_report_job():
     target_id = TARGET_CHAT_ID or get_saved_chat_id()
@@ -508,16 +627,21 @@ async def cmd_start(message: Message):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Şimdi Analiz Raporu Al", callback_data="btn_run_analysis")],
-        [InlineKeyboardButton(text="📋 Takip Listem", callback_data="btn_show_list")]
+        [
+            InlineKeyboardButton(text="🏦 FED & Makro Veriler", callback_data="btn_macro"),
+            InlineKeyboardButton(text="📰 Son Dakika Haberler", callback_data="btn_news")
+        ],
+        [InlineKeyboardButton(text="📋 Takip Listem & Alarmlar", callback_data="btn_show_list")]
     ])
     
     help_text = (
-        "🚀 <b>Kripto İstihbarat Terminali Aktif!</b>\n\n"
-        "• <b>/analiz:</b> Anlık kapsamlı piyasa raporunu döker.\n"
-        "• <b>/ekle &lt;coin&gt;:</b> Takip listesine yeni coin ekler (Örn: <code>/ekle avax</code>)\n"
-        "• <b>/sil &lt;coin&gt;:</b> Listeden coin çıkarır (Örn: <code>/sil fet</code>)\n"
-        "• <b>/alarm &lt;coin&gt; &lt;fiyat&gt;:</b> Fiyat alarmı kurar (Örn: <code>/alarm btc 95000</code>)\n"
-        "• <b>/liste:</b> Takip edilen coinleri ve aktif alarmları gösterir.\n\n"
+        "🚀 <b>Kripto İstihbarat & Makro Terminali Aktif!</b>\n\n"
+        "• <b>/analiz:</b> Teknik göstergeler ve piyasa pozisyon raporu.\n"
+        "• <b>/makro:</b> Bu haftaki kritik ABD verileri (FED, İstihdam, TÜFE).\n"
+        "• <b>/haberler:</b> En güncel sıcak kripto ve makro haberler.\n"
+        "• <b>/ekle &lt;coin&gt; | /sil &lt;coin&gt;:</b> Liste yönetimi.\n"
+        "• <b>/alarm &lt;coin&gt; &lt;fiyat&gt;:</b> Anlık fiyat alarmı.\n"
+        "• <b>/liste:</b> Aktif listeni ve kurulan alarmları gösterir.\n\n"
         "⏰ Her saatin <b>:30 geçesinde</b> otomatik rapor iletilecektir."
     )
     await message.answer(help_text, reply_markup=keyboard)
@@ -526,11 +650,35 @@ async def cmd_start(message: Message):
 async def cmd_analiz(message: Message):
     await send_market_report(message.chat.id)
 
+@dp.message(Command("makro"))
+async def cmd_makro(message: Message):
+    await message.answer("⏳ <i>Küresel ekonomi takvimi taranıyor...</i>")
+    async with aiohttp.ClientSession() as session:
+        events = await fetch_macro_calendar(session)
+    report = format_macro_report(events)
+    await message.answer(report)
+
+@dp.message(Command("haberler"))
+async def cmd_haberler(message: Message):
+    await message.answer("⏳ <i>Son dakika haber akışı taranıyor...</i>")
+    async with aiohttp.ClientSession() as session:
+        news = await fetch_latest_crypto_news(session, limit=5)
+
+    if not news:
+        await message.answer("ℹ️ <i>Şu anda yeni bir haber akışı çekilemedi.</i>")
+        return
+
+    lines = ["📰 <b>KRİPTO & PİYASA SON DAKİKA GELİŞMELERİ</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+    for i, item in enumerate(news, 1):
+        lines.append(f"<b>{i}.</b> {item['title']}\n🔗 <a href='{item['link']}'>Haberi Görüntüle</a>\n")
+
+    await message.answer("\n".join(lines), disable_web_page_preview=True)
+
 @dp.message(Command("ekle"))
 async def cmd_ekle(message: Message):
     parts = message.text.strip().split()
     if len(parts) < 2:
-        await message.reply("⚠️ Kullanım: <code>/ekle &lt;coin&gt;</code>\nÖrnek: <code>/ekle avax</code> veya <code>/ekle link</code>")
+        await message.reply("⚠️ Kullanım: <code>/ekle &lt;coin&gt;</code>\nÖrnek: <code>/ekle avax</code>")
         return
 
     coin_raw = parts[1].upper().replace("USDT", "")
@@ -542,23 +690,19 @@ async def cmd_ekle(message: Message):
     async with aiohttp.ClientSession() as session:
         cur_p = await fetch_current_price(session, usdt_symbol)
         if not cur_p:
-            await message.reply(f"❌ <b>{usdt_symbol}</b> Binance üzerinde bulunamadı! Lütfen sembolü doğru yazdığınızdan emin olun.")
+            await message.reply(f"❌ <b>{usdt_symbol}</b> bulunamadı!")
             return
-
         btc_p = await fetch_current_price(session, btc_symbol)
         has_btc_pair = btc_symbol if btc_p else None
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT OR REPLACE INTO tracked_coins VALUES (?, ?, ?)", (usdt_symbol, f"{coin_raw} ({coin_raw})", has_btc_pair))
-        conn.commit()
-        parity_info = f"Binance {btc_symbol} tahtası bağlandı." if has_btc_pair else "Sentetik BTC oranı kullanılacak."
-        await message.reply(f"✅ <b>{coin_raw}</b> başarıyla takip listesine eklendi!\n💰 Güncel Fiyat: <code>${cur_p:,.4f}</code>\n⚡ {parity_info}")
-    except Exception as e:
-        await message.reply(f"Hata oluştu: {e}")
-    finally:
-        conn.close()
+    cursor.execute("INSERT OR REPLACE INTO tracked_coins VALUES (?, ?, ?)", (usdt_symbol, f"{coin_raw} ({coin_raw})", has_btc_pair))
+    conn.commit()
+    conn.close()
+
+    parity_info = f"Binance {btc_symbol} tahtası bağlandı." if has_btc_pair else "Sentetik BTC paritesi kullanılacak."
+    await message.reply(f"✅ <b>{coin_raw}</b> listeye eklendi!\n💰 Güncel Fiyat: <code>${cur_p:,.4f}</code>\n⚡ {parity_info}")
 
 @dp.message(Command("sil"))
 async def cmd_sil(message: Message):
@@ -578,15 +722,15 @@ async def cmd_sil(message: Message):
     conn.close()
 
     if deleted > 0:
-        await message.reply(f"🗑️ <b>{coin_raw}</b> takip listesinden çıkarıldı.")
+        await message.reply(f"🗑️ <b>{coin_raw}</b> listeden çıkarıldı.")
     else:
-        await message.reply(f"ℹ️ <b>{coin_raw}</b> zaten takip listenizde bulunmuyor.")
+        await message.reply(f"ℹ️ <b>{coin_raw}</b> zaten listenizde yok.")
 
 @dp.message(Command("alarm"))
 async def cmd_alarm(message: Message):
     parts = message.text.strip().split()
     if len(parts) < 3:
-        await message.reply("⚠️ Kullanım: <code>/alarm &lt;coin&gt; &lt;hedef_fiyat&gt;</code>\nÖrnek: <code>/alarm btc 95000</code> veya <code>/alarm sol 140.5</code>")
+        await message.reply("⚠️ Kullanım: <code>/alarm &lt;coin&gt; &lt;hedef_fiyat&gt;</code>\nÖrnek: <code>/alarm btc 95000</code>")
         return
 
     coin_raw = parts[1].upper().replace("USDT", "")
@@ -628,7 +772,7 @@ async def cmd_alarm(message: Message):
 async def cmd_alarm_sil(message: Message):
     parts = message.text.strip().split()
     if len(parts) < 2:
-        await message.reply("⚠️ Kullanım: <code>/alarm_sil &lt;alarm_id&gt;</code>\nAlarm ID'sini öğrenmek için <code>/liste</code> yazabilirsiniz.")
+        await message.reply("⚠️ Kullanım: <code>/alarm_sil &lt;alarm_id&gt;</code>")
         return
     try:
         a_id = int(parts[1])
@@ -644,9 +788,9 @@ async def cmd_alarm_sil(message: Message):
     conn.close()
 
     if deleted > 0:
-        await message.reply(f"🗑️ Alarm #{a_id} başarıyla silindi.")
+        await message.reply(f"🗑️ Alarm #{a_id} silindi.")
     else:
-        await message.reply(f"ℹ️ Bu ID'ye ait aktif bir alarm bulunamadı.")
+        await message.reply("ℹ️ Aktif alarm bulunamadı.")
 
 @dp.message(Command("liste"))
 async def cmd_liste(message: Message):
@@ -668,15 +812,25 @@ async def cmd_liste(message: Message):
     text = (
         "📋 <b>TAKİP EDİLEN COINLER:</b>\n" +
         ("\n".join(coin_lines) if coin_lines else "<i>Liste boş.</i>") +
-        "\n\n⏰ <b>AKTİF ALARMLARINIZ:</b>\n" + alarm_text +
-        "\n\n💡 <i>Yeni coin eklemek için: <code>/ekle &lt;coin&gt;</code>\nAlarm kurmak için: <code>/alarm &lt;coin&gt; &lt;fiyat&gt;</code></i>"
+        "\n\n⏰ <b>AKTİF ALARMLARINIZ:</b>\n" + alarm_text
     )
     await message.answer(text)
 
+# BUTON YÖNLENDİRMELERİ
 @dp.callback_query(F.data == "btn_run_analysis")
 async def callback_analiz(callback: CallbackQuery):
     await callback.answer("Hızlı analiz başlatıldı...")
     await send_market_report(callback.message.chat.id)
+
+@dp.callback_query(F.data == "btn_macro")
+async def callback_macro(callback: CallbackQuery):
+    await callback.answer("Makro veriler taranıyor...")
+    await cmd_makro(callback.message)
+
+@dp.callback_query(F.data == "btn_news")
+async def callback_news(callback: CallbackQuery):
+    await callback.answer("Haberler getiriliyor...")
+    await cmd_haberler(callback.message)
 
 @dp.callback_query(F.data == "btn_show_list")
 async def callback_list(callback: CallbackQuery):
@@ -689,9 +843,7 @@ async def web_health_check(request):
 async def main():
     init_db()
 
-    # Saatlik Analiz Raporu (:30'da)
     scheduler.add_job(scheduled_report_job, 'cron', minute=30)
-    # Hızlı Fiyat Alarmı Kontrolcüsü (Her 40 saniyede bir)
     scheduler.add_job(check_price_alarms_job, 'interval', seconds=40)
     scheduler.start()
 
