@@ -35,6 +35,10 @@ TIMEFRAMES = [
     ("1A", "1M")
 ]
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+}
+
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return 50.0
@@ -93,29 +97,37 @@ def calculate_dynamic_sr(candles, current_price):
         return f"${s2:,.4f}", f"${s1:,.4f}"
     return f"${s1:,.4f}", f"${r1:,.4f}"
 
-async def fetch_binance_klines(session, symbol, interval, limit=30):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    try:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                return await resp.json()
-    except Exception:
-        pass
+# BULUT ENGELİNİ AŞAN ÇOKLU API İSTEMCİSİ
+async def fetch_crypto_klines(session, symbol, interval, limit=30):
+    endpoints = [
+        f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    ]
+    for url in endpoints:
+        try:
+            async with session.get(url, headers=HEADERS, timeout=4) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        return data
+        except Exception:
+            continue
     return None
 
 async def fetch_btc_dominance(session):
     try:
-        async with session.get("https://api.coingecko.com/api/v3/global", timeout=5) as resp:
+        async with session.get("https://api.coingecko.com/api/v3/global", headers=HEADERS, timeout=5) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return data.get("data", {}).get("market_cap_percentage", {}).get("btc", 0.0)
     except Exception:
         pass
-    return 56.5
+    return 58.30
 
 async def build_full_report():
     async with aiohttp.ClientSession() as session:
-        btc_c = await fetch_binance_klines(session, "BTCUSDT", "4h", 30)
+        btc_c = await fetch_crypto_klines(session, "BTCUSDT", "4h", 30)
         btc_price = float(btc_c[-1][4]) if btc_c else 0.0
         btc_closes = [float(c[4]) for c in btc_c] if btc_c else []
         btc_rsi = calculate_rsi(btc_closes)
@@ -126,7 +138,7 @@ async def build_full_report():
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
         
         cards = [
-            f"📊 <b>BİNANCE RESMİ ANALİZ | {now_str}</b>\n"
+            f"📊 <b>PİYASA ANALİZ RAPORU | {now_str}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🪙 <b>Bitcoin (BTC):</b> <code>${btc_price:,.2f}</code> | RSI (4s): <b>{btc_rsi:.1f}</b>\n"
             f"🎯 BTC Sinyali (4s): <b>{btc_sig}</b>\n\n"
@@ -135,7 +147,7 @@ async def build_full_report():
         ]
 
         for item in TRACKED_COINS:
-            c_4h = await fetch_binance_klines(session, item["symbol"], "4h", 30)
+            c_4h = await fetch_crypto_klines(session, item["symbol"], "4h", 30)
             if not c_4h:
                 continue
             cur_p = float(c_4h[-1][4])
@@ -147,12 +159,12 @@ async def build_full_report():
                 if inter == "4h":
                     sig = evaluate_signal(c_closes)
                 else:
-                    sub_c = await fetch_binance_klines(session, item["symbol"], inter, 25)
+                    sub_c = await fetch_crypto_klines(session, item["symbol"], inter, 25)
                     sig = evaluate_signal([float(c[4]) for c in sub_c]) if sub_c else "⚪"
                 tf_results.append(f"{lbl}:{'🟢' if 'AL' in sig else ('🔴' if 'SAT' in sig else '⚪')}")
 
             if item["btc_pair"]:
-                b_c = await fetch_binance_klines(session, item["btc_pair"], "4h", 25)
+                b_c = await fetch_crypto_klines(session, item["btc_pair"], "4h", 25)
                 b_ratio = float(b_c[-1][4]) if b_c else 0
                 b_sig = evaluate_signal([float(c[4]) for c in b_c]) if b_c else "⚪ NÖTR"
                 parity_text = f"<code>{b_ratio:.8f} BTC</code>"
@@ -178,7 +190,7 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
 async def send_market_report(chat_id):
-    await bot.send_message(chat_id, "⏳ <b>Binance Verileri Taranıyor...</b>")
+    await bot.send_message(chat_id, "⏳ <b>Veriler Taranıyor...</b>")
     cards = await build_full_report()
     for card in cards:
         await bot.send_message(chat_id, card)
@@ -197,7 +209,7 @@ async def cmd_start(message: Message):
     global TARGET_CHAT_ID
     TARGET_CHAT_ID = message.chat.id
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Şimdi Analiz Raporu Al", callback_data="btn_run_analysis")]])
-    await message.answer("🚀 <b>Bulut Sunucu Botu Aktif!</b>\n\nHer saat :30 geçe otomatik rapor gelecektir.", reply_markup=keyboard)
+    await message.answer("🚀 <b>Bulut Analiz İstasyonu Aktif!</b>\n\nHer saat :30 geçe otomatik rapor gelecektir.", reply_markup=keyboard)
 
 @dp.message(Command("analiz"))
 async def cmd_analiz(message: Message):
@@ -208,7 +220,6 @@ async def callback_analiz(callback: CallbackQuery):
     await callback.answer("Taranıyor...")
     await send_market_report(callback.message.chat.id)
 
-# Render'ın botu kapatmasını önleyen web sunucusu
 async def web_health_check(request):
     return web.Response(text="Bot 7/24 aktif calisiyor!")
 
@@ -216,7 +227,6 @@ async def main():
     scheduler.add_job(scheduled_job, 'cron', minute=30)
     scheduler.start()
     
-    # Render Port dinleyicisi
     app = web.Application()
     app.router.add_get("/", web_health_check)
     runner = web.AppRunner(app)
