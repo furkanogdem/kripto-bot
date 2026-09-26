@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sqlite3
 from datetime import datetime
 import aiohttp
 from aiohttp import web
@@ -13,21 +14,17 @@ from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ==========================================
-# AYARLAR
+# AYARLAR VE VERİTABANI
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8844777837:AAGDcmAxtmVVCQcXFiMklcv7e_fC8ZTbamQ"
 TARGET_CHAT_ID = None
 
 logging.basicConfig(level=logging.INFO)
+DB_PATH = "kripto_bot.db"
 
-TRACKED_COINS = [
-    {"name": "ETHEREUM (ETH)", "symbol": "ETHUSDT", "btc_pair": "ETHBTC"},
-    {"name": "SOLANA (SOL)", "symbol": "SOLUSDT", "btc_pair": "SOLBTC"},
-    {"name": "FETCH.AI (FET)", "symbol": "FETUSDT", "btc_pair": "FETBTC"},
-    {"name": "BITTENSOR (TAO)", "symbol": "TAOUSDT", "btc_pair": "TAOBTC"},
-    {"name": "CELESTIA (TIA)", "symbol": "TIAUSDT", "btc_pair": None},
-    {"name": "ARKHAM (ARKM)", "symbol": "ARKMUSDT", "btc_pair": None}
-]
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+}
 
 TIMEFRAMES = [
     ("15d", "15m"),
@@ -38,12 +35,74 @@ TIMEFRAMES = [
     ("1A", "1M")
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-}
+def init_db():
+    """Veritabanını ve varsayılan takip listesini hazırlar"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tracked_coins (
+            symbol TEXT PRIMARY KEY,
+            name TEXT,
+            btc_pair TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS price_alarms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            symbol TEXT,
+            target_price REAL,
+            direction TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+
+    # Eğer takip listesi boşsa varsayılan coinleri yükle
+    cursor.execute("SELECT COUNT(*) FROM tracked_coins")
+    if cursor.fetchone()[0] == 0:
+        default_coins = [
+            ("ETHUSDT", "ETHEREUM (ETH)", "ETHBTC"),
+            ("SOLUSDT", "SOLANA (SOL)", "SOLBTC"),
+            ("FETUSDT", "FETCH.AI (FET)", "FETBTC"),
+            ("TAOUSDT", "BITTENSOR (TAO)", "TAOBTC"),
+            ("TIAUSDT", "CELESTIA (TIA)", None),
+            ("ARKMUSDT", "ARKHAM (ARKM)", None)
+        ]
+        cursor.executemany("INSERT INTO tracked_coins VALUES (?, ?, ?)", default_coins)
+
+    conn.commit()
+    conn.close()
+
+def get_tracked_coins():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT symbol, name, btc_pair FROM tracked_coins")
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"symbol": r[0], "name": r[1], "btc_pair": r[2]} for r in rows]
+
+def get_saved_chat_id():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM bot_settings WHERE key = 'target_chat_id'")
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row else None
+
+def save_chat_id(chat_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO bot_settings VALUES ('target_chat_id', ?)", (str(chat_id),))
+    conn.commit()
+    conn.close()
 
 # ==========================================
-# MATEMATİKSEL VE TEKNİK ANALİZ
+# TEKNİK ANALİZ MATEMATİĞİ
 # ==========================================
 def calculate_rsi_series(closes, period=14):
     if not closes or len(closes) < period + 1:
@@ -70,7 +129,6 @@ def check_rsi_divergence(closes, rsis):
         return None
     recent_c, prev_c = closes[-6:], closes[-18:-6]
     recent_r, prev_r = rsis[-6:], rsis[-18:-6]
-
     max_c_rec, max_c_prev = max(recent_c), max(prev_c)
     max_r_rec, max_r_prev = max(recent_r), max(prev_r)
     min_c_rec, min_c_prev = min(recent_c), min(prev_c)
@@ -131,7 +189,6 @@ def calculate_daily_sr(daily_candles, current_price):
     levels = [s3, s2, s1, pivot, r1, r2, r3]
     supports = [lvl for lvl in levels if lvl < current_price]
     resistances = [lvl for lvl in levels if lvl > current_price]
-
     s_val = max(supports) if supports else s1
     r_val = min(resistances) if resistances else r1
     return f"${s_val:,.4f}", f"${r_val:,.4f}"
@@ -154,7 +211,7 @@ def format_funding_human(rate_val):
         return f"🔥 Aşırı Short {perc_str} — Squeeze (Patlama) Riski"
 
 # ==========================================
-# ASYNC VERİ ÇEKİCİLERİ
+# ASYNC VERİ ÇEKME MOTORU
 # ==========================================
 async def fetch_crypto_klines(session, symbol, interval, limit=35):
     if not symbol:
@@ -171,6 +228,24 @@ async def fetch_crypto_klines(session, symbol, interval, limit=35):
                     data = await resp.json()
                     if isinstance(data, list) and len(data) > 0:
                         return data
+        except Exception:
+            continue
+    return None
+
+async def fetch_current_price(session, symbol):
+    """Alarm kontrolü için hızlı anlık fiyat çeker"""
+    endpoints = [
+        f"https://data-api.binance.vision/api/v3/ticker/price?symbol={symbol}",
+        f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}",
+        f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}"
+    ]
+    for url in endpoints:
+        try:
+            async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if "price" in data:
+                        return float(data["price"])
         except Exception:
             continue
     return None
@@ -223,11 +298,10 @@ async def fetch_btc_dominance(session):
     return 58.30
 
 # ==========================================
-# HIZLI PARALEL KART OLUŞTURUCU
+# RAPOR MOTORU
 # ==========================================
 async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     sym = item["symbol"]
-    # 4h, 1d, diğer zaman dilimleri ve vadeli fonlamayı tek seferde paralel çek
     c_4h_task = fetch_crypto_klines(session, sym, "4h", 35)
     c_1d_task = fetch_crypto_klines(session, sym, "1d", 15)
     c_15m_task = fetch_crypto_klines(session, sym, "15m", 25)
@@ -258,7 +332,6 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     spike_msg = check_volume_spike(c_4h)
     fund_human_text = format_funding_human(fund_val)
 
-    # 6 Zaman Dilimli Sinyaller
     tf_data_map = {"15d": c_15m, "1s": c_1h, "4s": c_4h, "1G": c_1d, "1H": c_1w, "1A": c_1M}
     tf_results = []
     for lbl, _ in TIMEFRAMES:
@@ -271,7 +344,6 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
             sig = "⚪"
         tf_results.append(f"{lbl}:{'🟢' if 'AL' in sig else ('🔴' if 'SAT' in sig else '⚪')}")
 
-    # BTC Paritesi
     if item["btc_pair"]:
         if b_c:
             b_ratio = float(b_c[-1][4])
@@ -283,7 +355,6 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
             parity_text = "Veri Yok"
             b_sig = "⚪ NÖTR"
     else:
-        # Sentetik BTC Paritesi
         if btc_closes and len(btc_closes) > 0 and btc_price > 0:
             min_len = min(len(c_closes), len(btc_closes))
             synth_closes = [c_closes[-min_len + i] / btc_closes[-min_len + i] for i in range(min_len)]
@@ -313,12 +384,8 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
         f"💬 {p_note}{alert_block}\n"
     )
 
-# ==========================================
-# ANA RAPOR DERLEYİCİ
-# ==========================================
 async def build_full_report():
     async with aiohttp.ClientSession() as session:
-        # 1. BTC ve Genel Piyasa Verilerini Paralel Çek
         btc_c, btcd_val, fear_greed, btc_fund_val = await asyncio.gather(
             fetch_crypto_klines(session, "BTCUSDT", "4h", 35),
             fetch_btc_dominance(session),
@@ -348,10 +415,10 @@ async def build_full_report():
         )
         cards = [header]
 
-        # 2. Tüm Altcoinleri Aynı Anda Paralel Tara (~2 saniye)
+        tracked = get_tracked_coins()
         coin_cards = await asyncio.gather(*[
             build_single_coin_card(session, item, btc_c, btc_price, btc_closes)
-            for item in TRACKED_COINS
+            for item in tracked
         ])
 
         for c_card in coin_cards:
@@ -361,7 +428,54 @@ async def build_full_report():
         return cards
 
 # ==========================================
-# TELEGRAM YÖNETİCİSİ VE BULUT PORTU
+# ALARM DÖNGÜSÜ (FİYAT BEKÇİSİ)
+# ==========================================
+async def check_price_alarms_job():
+    """Her 40 saniyede bir bekleyen alarmları kontrol eder"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, chat_id, symbol, target_price, direction FROM price_alarms")
+    alarms = cursor.fetchall()
+    if not alarms:
+        conn.close()
+        return
+
+    triggered_ids = []
+    async with aiohttp.ClientSession() as session:
+        for alarm_id, chat_id, symbol, target_price, direction in alarms:
+            cur_price = await fetch_current_price(session, symbol)
+            if not cur_price:
+                continue
+
+            hit = False
+            if direction == "ABOVE" and cur_price >= target_price:
+                hit = True
+            elif direction == "BELOW" and cur_price <= target_price:
+                hit = True
+
+            if hit:
+                triggered_ids.append(alarm_id)
+                direction_icon = "🚀 YUKARI KIRILIM" if direction == "ABOVE" else "📉 AŞAĞI KIRILIM"
+                msg = (
+                    f"🔔 <b>FİYAT ALARMI TETİKLENDİ!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>{symbol}:</b> Hedef fiyata ulaştı!\n"
+                    f"🎯 Hedef: <code>${target_price:,.4f}</code>\n"
+                    f"💰 Güncel Fiyat: <code>${cur_price:,.4f}</code>\n"
+                    f"⚡ Durum: <b>{direction_icon}</b>"
+                )
+                try:
+                    await bot.send_message(chat_id, msg)
+                except Exception as e:
+                    logging.error(f"Alarm mesaj hatası: {e}")
+
+    if triggered_ids:
+        cursor.execute(f"DELETE FROM price_alarms WHERE id IN ({','.join(['?']*len(triggered_ids))})", triggered_ids)
+        conn.commit()
+    conn.close()
+
+# ==========================================
+# TELEGRAM KOMUTLARI
 # ==========================================
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -378,11 +492,11 @@ async def send_market_report(chat_id):
         logging.error(f"Rapor hatası: {e}", exc_info=True)
         await bot.send_message(chat_id, f"⚠️ Veri alınırken geçici bir hata oluştu: {e}")
 
-async def scheduled_job():
-    global TARGET_CHAT_ID
-    if TARGET_CHAT_ID:
+async def scheduled_report_job():
+    target_id = TARGET_CHAT_ID or get_saved_chat_id()
+    if target_id:
         try:
-            await send_market_report(TARGET_CHAT_ID)
+            await send_market_report(target_id)
         except Exception as e:
             logging.error(f"Zamanlanmış bildirim hatası: {e}")
 
@@ -390,25 +504,197 @@ async def scheduled_job():
 async def cmd_start(message: Message):
     global TARGET_CHAT_ID
     TARGET_CHAT_ID = message.chat.id
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Şimdi Analiz Raporu Al", callback_data="btn_run_analysis")]])
-    await message.answer("🚀 <b>Piyasa İstihbarat Terminali Aktif!</b>\n\n• Günlük Destek / Dirençler\n• Sözel Pozisyon Raporları\n• Ultra Hızlı Paralel Tarama Devrede.\n\nHer saat :30 geçe otomatik bildirim gelecektir.", reply_markup=keyboard)
+    save_chat_id(TARGET_CHAT_ID)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Şimdi Analiz Raporu Al", callback_data="btn_run_analysis")],
+        [InlineKeyboardButton(text="📋 Takip Listem", callback_data="btn_show_list")]
+    ])
+    
+    help_text = (
+        "🚀 <b>Kripto İstihbarat Terminali Aktif!</b>\n\n"
+        "• <b>/analiz:</b> Anlık kapsamlı piyasa raporunu döker.\n"
+        "• <b>/ekle &lt;coin&gt;:</b> Takip listesine yeni coin ekler (Örn: <code>/ekle avax</code>)\n"
+        "• <b>/sil &lt;coin&gt;:</b> Listeden coin çıkarır (Örn: <code>/sil fet</code>)\n"
+        "• <b>/alarm &lt;coin&gt; &lt;fiyat&gt;:</b> Fiyat alarmı kurar (Örn: <code>/alarm btc 95000</code>)\n"
+        "• <b>/liste:</b> Takip edilen coinleri ve aktif alarmları gösterir.\n\n"
+        "⏰ Her saatin <b>:30 geçesinde</b> otomatik rapor iletilecektir."
+    )
+    await message.answer(help_text, reply_markup=keyboard)
 
 @dp.message(Command("analiz"))
 async def cmd_analiz(message: Message):
     await send_market_report(message.chat.id)
+
+@dp.message(Command("ekle"))
+async def cmd_ekle(message: Message):
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.reply("⚠️ Kullanım: <code>/ekle &lt;coin&gt;</code>\nÖrnek: <code>/ekle avax</code> veya <code>/ekle link</code>")
+        return
+
+    coin_raw = parts[1].upper().replace("USDT", "")
+    usdt_symbol = f"{coin_raw}USDT"
+    btc_symbol = f"{coin_raw}BTC"
+
+    await message.reply(f"🔍 Binance üzerinde <b>{usdt_symbol}</b> kontrol ediliyor...")
+
+    async with aiohttp.ClientSession() as session:
+        cur_p = await fetch_current_price(session, usdt_symbol)
+        if not cur_p:
+            await message.reply(f"❌ <b>{usdt_symbol}</b> Binance üzerinde bulunamadı! Lütfen sembolü doğru yazdığınızdan emin olun.")
+            return
+
+        btc_p = await fetch_current_price(session, btc_symbol)
+        has_btc_pair = btc_symbol if btc_p else None
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT OR REPLACE INTO tracked_coins VALUES (?, ?, ?)", (usdt_symbol, f"{coin_raw} ({coin_raw})", has_btc_pair))
+        conn.commit()
+        parity_info = f"Binance {btc_symbol} tahtası bağlandı." if has_btc_pair else "Sentetik BTC oranı kullanılacak."
+        await message.reply(f"✅ <b>{coin_raw}</b> başarıyla takip listesine eklendi!\n💰 Güncel Fiyat: <code>${cur_p:,.4f}</code>\n⚡ {parity_info}")
+    except Exception as e:
+        await message.reply(f"Hata oluştu: {e}")
+    finally:
+        conn.close()
+
+@dp.message(Command("sil"))
+async def cmd_sil(message: Message):
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.reply("⚠️ Kullanım: <code>/sil &lt;coin&gt;</code>\nÖrnek: <code>/sil fet</code>")
+        return
+
+    coin_raw = parts[1].upper().replace("USDT", "")
+    usdt_symbol = f"{coin_raw}USDT"
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM tracked_coins WHERE symbol = ?", (usdt_symbol,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    if deleted > 0:
+        await message.reply(f"🗑️ <b>{coin_raw}</b> takip listesinden çıkarıldı.")
+    else:
+        await message.reply(f"ℹ️ <b>{coin_raw}</b> zaten takip listenizde bulunmuyor.")
+
+@dp.message(Command("alarm"))
+async def cmd_alarm(message: Message):
+    parts = message.text.strip().split()
+    if len(parts) < 3:
+        await message.reply("⚠️ Kullanım: <code>/alarm &lt;coin&gt; &lt;hedef_fiyat&gt;</code>\nÖrnek: <code>/alarm btc 95000</code> veya <code>/alarm sol 140.5</code>")
+        return
+
+    coin_raw = parts[1].upper().replace("USDT", "")
+    usdt_symbol = f"{coin_raw}USDT"
+
+    try:
+        target_price = float(parts[2].replace(",", "."))
+    except ValueError:
+        await message.reply("❌ Geçersiz fiyat! Örnek: <code>/alarm btc 95000</code>")
+        return
+
+    async with aiohttp.ClientSession() as session:
+        cur_price = await fetch_current_price(session, usdt_symbol)
+
+    if not cur_price:
+        await message.reply(f"❌ <b>{usdt_symbol}</b> için güncel fiyat alınamadı.")
+        return
+
+    direction = "ABOVE" if target_price > cur_price else "BELOW"
+    dir_text = "üzerine çıktığında" if direction == "ABOVE" else "altına indiğinde"
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO price_alarms (chat_id, symbol, target_price, direction) VALUES (?, ?, ?, ?)",
+                   (message.chat.id, usdt_symbol, target_price, direction))
+    alarm_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    await message.reply(
+        f"⏰ <b>Fiyat Alarmı Kuruldu! (ID: {alarm_id})</b>\n\n"
+        f"🪙 <b>{usdt_symbol}</b>\n"
+        f"💰 Güncel Fiyat: <code>${cur_price:,.4f}</code>\n"
+        f"🎯 Hedef Fiyat: <code>${target_price:,.4f}</code>\n"
+        f"⚡ Fiyat {target_price:,.4f} seviyesinin <b>{dir_text}</b> bildirim alacaksınız."
+    )
+
+@dp.message(Command("alarm_sil"))
+async def cmd_alarm_sil(message: Message):
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.reply("⚠️ Kullanım: <code>/alarm_sil &lt;alarm_id&gt;</code>\nAlarm ID'sini öğrenmek için <code>/liste</code> yazabilirsiniz.")
+        return
+    try:
+        a_id = int(parts[1])
+    except ValueError:
+        await message.reply("❌ Geçersiz alarm ID!")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM price_alarms WHERE id = ? AND chat_id = ?", (a_id, message.chat.id))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    if deleted > 0:
+        await message.reply(f"🗑️ Alarm #{a_id} başarıyla silindi.")
+    else:
+        await message.reply(f"ℹ️ Bu ID'ye ait aktif bir alarm bulunamadı.")
+
+@dp.message(Command("liste"))
+async def cmd_liste(message: Message):
+    tracked = get_tracked_coins()
+    coin_lines = [f"• <b>{c['name']}</b> ({c['symbol']})" for c in tracked]
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, symbol, target_price, direction FROM price_alarms WHERE chat_id = ?", (message.chat.id,))
+    alarms = cursor.fetchall()
+    conn.close()
+
+    if alarms:
+        alarm_lines = [f"• ID <b>#{a[0]}</b>: {a[1]} -> <code>${a[2]:,.4f}</code> ({'Yukarı' if a[3]=='ABOVE' else 'Aşağı'})" for a in alarms]
+        alarm_text = "\n".join(alarm_lines)
+    else:
+        alarm_text = "<i>Aktif fiyat alarmınız yok.</i>"
+
+    text = (
+        "📋 <b>TAKİP EDİLEN COINLER:</b>\n" +
+        ("\n".join(coin_lines) if coin_lines else "<i>Liste boş.</i>") +
+        "\n\n⏰ <b>AKTİF ALARMLARINIZ:</b>\n" + alarm_text +
+        "\n\n💡 <i>Yeni coin eklemek için: <code>/ekle &lt;coin&gt;</code>\nAlarm kurmak için: <code>/alarm &lt;coin&gt; &lt;fiyat&gt;</code></i>"
+    )
+    await message.answer(text)
 
 @dp.callback_query(F.data == "btn_run_analysis")
 async def callback_analiz(callback: CallbackQuery):
     await callback.answer("Hızlı analiz başlatıldı...")
     await send_market_report(callback.message.chat.id)
 
+@dp.callback_query(F.data == "btn_show_list")
+async def callback_list(callback: CallbackQuery):
+    await callback.answer()
+    await cmd_liste(callback.message)
+
 async def web_health_check(request):
     return web.Response(text="Bot 7/24 aktif calisiyor!")
 
 async def main():
-    scheduler.add_job(scheduled_job, 'cron', minute=30)
+    init_db()
+
+    # Saatlik Analiz Raporu (:30'da)
+    scheduler.add_job(scheduled_report_job, 'cron', minute=30)
+    # Hızlı Fiyat Alarmı Kontrolcüsü (Her 40 saniyede bir)
+    scheduler.add_job(check_price_alarms_job, 'interval', seconds=40)
     scheduler.start()
-    
+
     app = web.Application()
     app.router.add_get("/", web_health_check)
     runner = web.AppRunner(app)
