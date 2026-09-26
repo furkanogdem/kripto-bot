@@ -193,7 +193,6 @@ def evaluate_signal(closes, rsi_val):
     return "⚪ NÖTR"
 
 def format_clean_price(val):
-    """Fiyatları mobilde yer kaplamayacak şekilde temiz formatlar"""
     if not isinstance(val, (int, float)):
         return "—"
     if val >= 10:
@@ -204,7 +203,6 @@ def format_clean_price(val):
         return f"${val:,.4f}"
 
 def calculate_sr_from_candles(candles, current_price):
-    """Herhangi bir zaman dilimindeki mumlardan (4s, 1G, 1H) Destek ve Direnç çıkarır"""
     if not candles or len(candles) < 2:
         return "—", "—"
     prev_c = candles[-2]
@@ -412,7 +410,7 @@ def format_macro_report(events):
     return "🏦 <b>ABD MAKRO EKONOMİ & FED TAKVİMİ (Bu Hafta)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(lines) + "\n" + cheat_sheet
 
 # ==========================================
-# RAPOR MOTORU (4s, 1G ve 1H Destek/Dirençli)
+# RAPOR MOTORU (BAĞIMSIZ DOLAR SİNYALİ ENTEGRELİ)
 # ==========================================
 async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     sym = item["symbol"]
@@ -441,7 +439,10 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     rsis_4h = calculate_rsi_series(c_closes)
     rsi_val_4h = rsis_4h[-1] if rsis_4h else 50.0
 
-    # 3 KADEMELİ DESTEK VE DİRENÇLER: 4s (Yakın), 1G (Ana), 1H (Haftalık Kale)
+    # 1. BAĞIMSIZ DOLAR (USDT) SİNYALİ
+    usdt_sig = evaluate_signal(c_closes, rsi_val_4h)
+
+    # 3 Kademeli Destek ve Dirençler (4s, 1G, 1H)
     s_4h, r_4h = calculate_sr_from_candles(c_4h, cur_p)
     s_1d, r_1d = calculate_sr_from_candles(c_1d, cur_p)
     s_1w, r_1w = calculate_sr_from_candles(c_1w, cur_p)
@@ -450,6 +451,7 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     spike_msg = check_volume_spike(c_4h)
     fund_human_text = format_funding_human(fund_val)
 
+    # 6 Zaman Dilimi Taraması
     tf_data_map = {"15d": c_15m, "1s": c_1h, "4s": c_4h, "1G": c_1d, "1H": c_1w, "1A": c_1M}
     tf_results = []
     for lbl, _ in TIMEFRAMES:
@@ -462,6 +464,7 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
             sig = "⚪"
         tf_results.append(f"{lbl}:{'🟢' if 'AL' in sig else ('🔴' if 'SAT' in sig else '⚪')}")
 
+    # 2. BTC İLE GÖRECELİ GÜÇ KIYASLAMASI
     if item["btc_pair"]:
         if b_c:
             b_ratio = float(b_c[-1][4])
@@ -484,7 +487,29 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
             parity_text = "—"
             b_sig = "⚪ NÖTR"
 
-    p_note = "🔥 BTC'den Güçlü" if "AL" in b_sig else ("❄️ BTC'den Zayıf" if "SAT" in b_sig else "⚖️ BTC ile Paralel")
+    if "AL" in b_sig:
+        btc_badge = "🔥 BTC'den Güçlü"
+    elif "SAT" in b_sig:
+        btc_badge = "❄️ BTC'den Zayıf"
+    else:
+        btc_badge = "⚖️ BTC ile Paralel"
+
+    # 3. AKILLI SENTEZ YORUMU (Dolar Yönü + BTC Gücü Harmanı)
+    if "AL" in usdt_sig and "AL" in b_sig:
+        p_note = "🚀 Hem dolar bazında yükselişte hem de BTC'den daha hızlı koşuyor."
+    elif "AL" in usdt_sig and "SAT" in b_sig:
+        p_note = "💡 Dolar bazında yön yukarı ancak Bitcoin taşımak daha avantajlı."
+    elif "SAT" in usdt_sig and "SAT" in b_sig:
+        p_note = "🔻 Hem dolar bazında düşüşte hem de Bitcoin'e karşı eriyor."
+    elif "SAT" in usdt_sig and "AL" in b_sig:
+        p_note = "🛡️ Dolar bazında zayıf olsa da BTC'ye karşı defansif güç sergiliyor."
+    elif "AL" in usdt_sig:
+        p_note = "📈 Dolar bazında alıcılı, BTC ile dengeli ilerliyor."
+    elif "SAT" in usdt_sig:
+        p_note = "📉 Dolar bazında satıcılı, temkinli olunmalı."
+    else:
+        p_note = "⚖️ Dolar ve BTC paritesinde dengeli/nötr görünüm."
+
     alerts = []
     if spike_msg:
         alerts.append(spike_msg)
@@ -495,10 +520,11 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     return (
         f"💎 <b>{item['name']}</b>\n"
         f"💰 Fiyat: <code>{format_clean_price(cur_p)}</code> | RSI (4s): <b>{rsi_val_4h:.1f}</b>\n"
+        f"🎯 <b>Dolar Sinyali (4s):</b> <b>{usdt_sig}</b>\n"
         f"📈 <b>6 Zaman Dilimi:</b> {' | '.join(tf_results)}\n"
         f"🛡️ <b>Destek:</b> {s_4h} (4s) | {s_1d} (1G) | {s_1w} (1H)\n"
         f"🎯 <b>Direnç:</b> {r_4h} (4s) | {r_1d} (1G) | {r_1w} (1H)\n"
-        f"⚡ <b>BTC Paritesi:</b> {parity_text} ({b_sig})\n"
+        f"⚡ <b>BTC Gücü:</b> {parity_text} ({btc_badge})\n"
         f"📊 <b>Piyasa Pozisyonu:</b> {fund_human_text}\n"
         f"💬 {p_note}{alert_block}\n"
     )
@@ -610,7 +636,7 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
 async def send_market_report(chat_id):
-    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nTüm zaman dilimleri (4s, 1G, 1H) paralel taranıyor...")
+    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nDolar trendleri ve makro göstergeler taranıyor...")
     try:
         cards = await build_full_report()
         for card in cards:
@@ -645,7 +671,7 @@ async def cmd_start(message: Message):
     
     help_text = (
         "🚀 <b>Kripto İstihbarat & Makro Terminali Aktif!</b>\n\n"
-        "• <b>/analiz:</b> 4s, Günlük ve Haftalık seviyeli piyasa raporu.\n"
+        "• <b>/analiz:</b> Bağımsız Dolar Sinyali & 3 Kademeli S/R seviyeleri.\n"
         "• <b>/makro:</b> Bu haftaki kritik ABD verileri (FED, İstihdam, Enflasyon).\n"
         "• <b>/haberler:</b> En güncel sıcak kripto ve makro haberler.\n"
         "• <b>/ekle &lt;coin&gt; | /sil &lt;coin&gt;:</b> Liste yönetimi.\n"
