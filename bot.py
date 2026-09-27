@@ -44,12 +44,12 @@ HEADERS = {
 }
 
 TIMEFRAMES = [
-    ("15d", "15m"),
-    ("1s", "1h"),
-    ("4s", "4h"),
-    ("1G", "1d"),
-    ("1H", "1w"),
-    ("1A", "1M")
+    ("15m", "15m"),
+    ("1h", "1h"),
+    ("4h", "4h"),
+    ("1D", "1d"),
+    ("1W", "1w"),
+    ("1M", "1M")
 ]
 
 MACRO_TRANSLATIONS = {
@@ -250,7 +250,6 @@ def calculate_rsi_series(closes, period=14):
     return rsis
 
 def calculate_atr(candles, period=14):
-    """Average True Range (ATR) hesaplar"""
     if not candles or len(candles) < period + 1:
         return 0.0
     trs = []
@@ -324,7 +323,7 @@ def evaluate_signal(closes, rsi_val):
 def format_clean_price(val):
     if not isinstance(val, (int, float)):
         return "—"
-    if val >= 10:
+    if val >= 100:
         return f"${val:,.2f}"
     elif val >= 1:
         return f"${val:,.3f}"
@@ -351,18 +350,18 @@ def calculate_sr_from_candles(candles, current_price):
 
 def format_funding_human(rate_val):
     if rate_val is None:
-        return "⚖️ Dengeli / Nötr"
+        return "Dengeli / Nötr"
     perc_str = f"(%{rate_val:+.4f})"
     if rate_val >= 0.030:
-        return f"🔥 Aşırı Isınmış {perc_str} — Düzeltme & Long Sıkışması Riski"
+        return f"Aşırı Isınmış {perc_str} ⚠️"
     elif rate_val >= 0.012:
-        return f"📈 Long Ağırlıklı {perc_str} — Alıcılar Baskın"
+        return f"Long Ağırlıklı {perc_str} 📈"
     elif rate_val >= -0.005:
-        return f"⚖️ Dengeli / Nötr {perc_str}"
+        return f"Dengeli {perc_str} ⚖️"
     elif rate_val >= -0.020:
-        return f"📉 Short Ağırlıklı {perc_str} — Satıcı Baskısı"
+        return f"Short Ağırlıklı {perc_str} 📉"
     else:
-        return f"⚡ Aşırı Short {perc_str} — Short Squeeze (Yukarı Patlama) Riski"
+        return f"Aşırı Short {perc_str} 🔥"
 
 def format_iso_to_tr_time(iso_str):
     try:
@@ -454,7 +453,6 @@ async def fetch_funding_rate_value(session, symbol):
     return 0.0100
 
 async def fetch_market_dominances(session):
-    """BTC ve USDT Dominanslarını birlikte çeker"""
     try:
         async with session.get("https://api.coingecko.com/api/v3/global", headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
             if resp.status == 200:
@@ -510,7 +508,7 @@ async def fetch_filtered_rss_news(session):
     return []
 
 # ==========================================
-# 1. SPOT ETF AKIŞLARI (CACHELİ & GÜÇLÜ)
+# 1. SPOT ETF AKIŞLARI
 # ==========================================
 def parse_farside_table(html):
     try:
@@ -584,17 +582,20 @@ async def fetch_etf_flows_report(session):
     if not eth_data:
         eth_data = get_etf_cache("ETH")
 
-    lines = ["🏦 <b>SPOT BITCOIN & ETHEREUM ETF AKIŞLARI</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+    lines = [
+        "🏦 <b>SPOT BITCOIN & ETHEREUM ETF AKIŞLARI</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    ]
 
     if btc_data:
         t_icon = "🟢" if btc_data["total"] >= 0 else "🔴"
         t_sign = "+" if btc_data["total"] >= 0 else ""
         lines.append(
-            f"🪙 <b>Bitcoin Spot ETF (Seans: {btc_data['date']}):</b>\n"
-            f"• <b>Net Toplam Akış:</b> {t_icon} <code>{t_sign}${btc_data['total']:,.1f} Milyon</code>\n"
-            f"• BlackRock (IBIT): <code>${btc_data['ibit']:,.1f}M</code>\n"
-            f"• Fidelity (FBTC): <code>${btc_data['fbtc']:,.1f}M</code>\n"
-            f"• Grayscale (GBTC): <code>${btc_data['gbtc']:,.1f}M</code>\n"
+            f"🪙 <b>Bitcoin Spot ETF</b> <i>(Seans: {btc_data['date']})</i>\n"
+            f"• <b>Net Giriş/Çıkış:</b> {t_icon} <code>{t_sign}${btc_data['total']:,.1f}M</code>\n"
+            f"• <b>BlackRock (IBIT):</b> <code>${btc_data['ibit']:,.1f}M</code>\n"
+            f"• <b>Fidelity (FBTC) :</b> <code>${btc_data['fbtc']:,.1f}M</code>\n"
+            f"• <b>Grayscale (GBTC):</b> <code>${btc_data['gbtc']:,.1f}M</code>\n"
         )
     else:
         lines.append("🪙 <b>Bitcoin Spot ETF:</b> Resmi seans verisi güncelleniyor...\n")
@@ -603,19 +604,19 @@ async def fetch_etf_flows_report(session):
         et_icon = "🟢" if eth_data["total"] >= 0 else "🔴"
         et_sign = "+" if eth_data["total"] >= 0 else ""
         lines.append(
-            f"💎 <b>Ethereum Spot ETF (Seans: {eth_data['date']}):</b>\n"
-            f"• <b>Net Toplam Akış:</b> {et_icon} <code>{et_sign}${eth_data['total']:,.1f} Milyon</code>\n"
+            f"💎 <b>Ethereum Spot ETF</b> <i>(Seans: {eth_data['date']})</i>\n"
+            f"• <b>Net Giriş/Çıkış:</b> {et_icon} <code>{et_sign}${eth_data['total']:,.1f}M</code>\n"
         )
     else:
         lines.append("💎 <b>Ethereum Spot ETF:</b> Resmi seans verisi güncelleniyor...\n")
 
     lines.append(
-        "💡 <i>Veriler ABD borsa kapanışı sonrası kesinleşir. Hafta sonu kapalıdır; ekranda daima en son tamamlanan resmi seansın kurumsal net akışı yer alır.</i>"
+        "<blockquote>💡 Veriler ABD borsa kapanışında netleşir. Hafta sonu kapalıdır; en son seans kurumsal girişini yansıtır.</blockquote>"
     )
     return "\n".join(lines)
 
 # ==========================================
-# 2. CANLI TASFİYE & KALDIRAÇ MOTORU (BYBIT + OKX)
+# 2. CANLI TASFİYE & KALDIRAÇ MOTORU
 # ==========================================
 async def get_live_derivatives_data(session):
     oi_usd = 0.0
@@ -689,24 +690,24 @@ async def fetch_liquidation_report(session):
     fund_txt = format_funding_human(d["funding_rate"])
 
     if d["ls_ratio"] >= 2.0:
-        state_note = "⚠️ <b>Aşırı Long Yığılması:</b> Long oranı çok yüksek, balinaların aşağı yönlü sert bir silkeleme/long patlatma riski yüksek!"
+        state_note = "Aşırı Long Yığılması: Long oranı çok yüksek, balinaların aşağı yönlü sert bir silkeleme/long patlatma riski yüksek!"
     elif d["ls_ratio"] <= 0.70:
-        state_note = "🔥 <b>Aşırı Short Baskısı:</b> Düşüşe oynayanlar çoğunlukta, yukarı doğru ani bir Short Squeeze patlaması tetiklenebilir!"
+        state_note = "Aşırı Short Baskısı: Düşüşe oynayanlar çoğunlukta, yukarı doğru ani bir Short Squeeze patlaması tetiklenebilir!"
     else:
-        state_note = "⚖️ <b>Dengeli Dağılım:</b> Vadeli piyasada alıcı ve satıcılar dengeli seyrediyor."
+        state_note = "Dengeli Dağılım: Vadeli piyasada alıcı ve satıcılar dengeli seyrediyor."
 
     return (
         f"💥 <b>PİYASA TASFİYE & KALDIRAÇ RAPORU</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 <b>Bitcoin (BTC) Vadeli Görünüm:</b>\n"
+        f"🪙 <b>Bitcoin (BTC) Vadeli Görünüm</b>\n"
         f"• <b>Açık Pozisyon (OI):</b> <code>${d['oi_usd'] / 1e9:,.2f} Milyar</code>\n"
-        f"• <b>Pozisyon Dağılımı:</b> 🟢 %{d['long_pct']:.1f} Long vs 🔴 %{d['short_pct']:.1f} Short\n"
-        f"• <b>Long/Short Oranı:</b> <code>{d['ls_ratio']:.2f}</code>\n"
-        f"• <b>Vadeli Fonlama:</b> {fund_txt}\n\n"
-        f"⚡ <b>Son Tasfiyeler (Kurumsal Havuz):</b>\n"
-        f"🔴 Long Tasfiyesi: <code>${max(d['long_liq'] / 1e6, 0.45):,.2f}M</code>\n"
-        f"🟢 Short Tasfiyesi: <code>${max(d['short_liq'] / 1e6, 0.28):,.2f}M</code>\n\n"
-        f"💡 {state_note}"
+        f"• <b>Pozisyon Oranı    :</b> 🟢 %{d['long_pct']:.1f} Long │ 🔴 %{d['short_pct']:.1f} Short\n"
+        f"• <b>Long/Short Oranı  :</b> <code>{d['ls_ratio']:.2f}</code>\n"
+        f"• <b>Vadeli Fonlama    :</b> {fund_txt}\n\n"
+        f"⚡ <b>Son Tasfiyeler (Kurumsal Havuz)</b>\n"
+        f"• <b>Long Tasfiyesi:</b> <code>${max(d['long_liq'] / 1e6, 0.45):,.2f}M</code> 🔴\n"
+        f"• <b>Short Tasfiyesi:</b> <code>${max(d['short_liq'] / 1e6, 0.28):,.2f}M</code> 🟢\n\n"
+        f"<blockquote>💡 {state_note}</blockquote>"
     )
 
 # ==========================================
@@ -735,11 +736,11 @@ async def check_leverage_squeeze_job():
                 f"🚨 <b>VADELİ PİYASA ALARMI: AŞIRI LONG YIĞILMASI!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"⚠️ <b>Piyasa Aşırı Isındı (Long Squeeze Riski)</b>\n\n"
-                f"📊 <b>Pozisyon Dağılımı:</b> 🟢 %{d['long_pct']:.1f} Long vs 🔴 %{d['short_pct']:.1f} Short\n"
-                f"⚡ <b>Long/Short Oranı:</b> <code>{d['ls_ratio']:.2f}</code>\n"
-                f"💰 <b>Açık Pozisyon:</b> <code>${d['oi_usd'] / 1e9:,.2f} Milyar</code>\n"
-                f"📈 <b>Fonlama Oranı:</b> <code>%{d['funding_rate']:+.4f}</code>\n\n"
-                f"💡 <i>Kaldıraçlı alıcılar aşırı çoğaldı. Balinalar vadeli pozisyonları sıfırlamak için sert bir silkeleme iğnesi atabilir, temkinli olun!</i>"
+                f"• <b>Dağılım :</b> 🟢 %{d['long_pct']:.1f} Long │ 🔴 %{d['short_pct']:.1f} Short\n"
+                f"• <b>L/S Oran:</b> <code>{d['ls_ratio']:.2f}</code>\n"
+                f"• <b>Açık Poz:</b> <code>${d['oi_usd'] / 1e9:,.2f} Milyar</code>\n"
+                f"• <b>Fonlama :</b> <code>%{d['funding_rate']:+.4f}</code>\n\n"
+                f"<blockquote>💡 Kaldıraçlı alıcılar aşırı çoğaldı. Balinalar pozisyonları sıfırlamak için sert bir silkeleme iğnesi atabilir!</blockquote>"
             )
         elif d["ls_ratio"] <= 0.65 or (d["short_pct"] >= 62.0 and d["funding_rate"] <= -0.015):
             triggered = True
@@ -748,11 +749,11 @@ async def check_leverage_squeeze_job():
                 f"🚨 <b>VADELİ PİYASA ALARMI: SHORT SQUEEZE TEHLİKESİ!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔥 <b>Ayı Tuzağı & Yukarı Patlama Potansiyeli</b>\n\n"
-                f"📊 <b>Pozisyon Dağılımı:</b> 🔴 %{d['short_pct']:.1f} Short vs 🟢 %{d['long_pct']:.1f} Long\n"
-                f"⚡ <b>Long/Short Oranı:</b> <code>{d['ls_ratio']:.2f}</code>\n"
-                f"💰 <b>Açık Pozisyon:</b> <code>${d['oi_usd'] / 1e9:,.2f} Milyar</code>\n"
-                f"📉 <b>Fonlama Oranı:</b> <code>%{d['funding_rate']:+.4f}</code>\n\n"
-                f"💡 <i>Düşüşe oynayan Short pozisyonlar aşırı birikti. Fiyat yukarı patlatılarak bu pozisyonlar tasfiye edilebilir (Short Squeeze ralli tetikleyicisi)!</i>"
+                f"• <b>Dağılım :</b> 🔴 %{d['short_pct']:.1f} Short │ 🟢 %{d['long_pct']:.1f} Long\n"
+                f"• <b>L/S Oran:</b> <code>{d['ls_ratio']:.2f}</code>\n"
+                f"• <b>Açık Poz:</b> <code>${d['oi_usd'] / 1e9:,.2f} Milyar</code>\n"
+                f"• <b>Fonlama :</b> <code>%{d['funding_rate']:+.4f}</code>\n\n"
+                f"<blockquote>💡 Short pozisyonlar aşırı birikti. Fiyat yukarı patlatılarak bu pozisyonlar tasfiye edilebilir (Ralli tetiği)!</blockquote>"
             )
 
         if triggered and msg:
@@ -762,7 +763,7 @@ async def check_leverage_squeeze_job():
                 logging.error(f"Squeeze bildirim hatası: {e}")
 
 # ==========================================
-# 3. GÜNLÜK MUM KAPANIŞ RAPORU (TSİ 03:05)
+# 3. GÜNLÜK MUM KAPANIŞ RAPORU
 # ==========================================
 async def build_daily_close_report():
     async with aiohttp.ClientSession() as session:
@@ -782,7 +783,7 @@ async def build_daily_close_report():
 
         closes_30 = [float(c[4]) for c in btc_c[:-1]]
         ema20 = calculate_ema(closes_30, 20)
-        ema_status = "🟢 20 Günlük EMA Üzerinde (Pozitif)" if close_p > ema20 else "🔴 20 Günlük EMA Altında (Dirençte)"
+        ema_status = "🟢 20G EMA Üzerinde" if close_p > ema20 else "🔴 20G EMA Altında"
 
         s_str, r_str = calculate_sr_from_candles(btc_c[:-1], close_p)
         c_icon = "🟢 BOĞA" if chg_pct >= 0 else "🔴 AYI"
@@ -801,36 +802,40 @@ async def build_daily_close_report():
         best_coin = coin_performances[0] if coin_performances else None
         worst_coin = coin_performances[-1] if coin_performances else None
 
-        best_str = f"🏆 <b>Günün Lideri:</b> {best_coin[0]} (<code>+%{best_coin[1]:.2f}</code>)" if best_coin and best_coin[1] > 0 else ""
-        worst_str = f"🔻 <b>Günün En Çok Düşeni:</b> {worst_coin[0]} (<code>%{worst_coin[1]:.2f}</code>)" if worst_coin and worst_coin[1] < 0 else ""
+        best_str = f"🏆 <b>Günün Lideri :</b> {best_coin[0]} (<code>+{best_coin[1]:.2f}%</code>)" if best_coin and best_coin[1] > 0 else ""
+        worst_str = f"🔻 <b>Günün Düşeni :</b> {worst_coin[0]} (<code>{worst_coin[1]:.2f}%</code>)" if worst_coin and worst_coin[1] < 0 else ""
 
         now_tr = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y")
 
         return (
-            f"🌙 <b>KRİTİK GÜNLÜK MUM KAPANIŞI (UTC 00:00 / TSİ 03:00)</b>\n"
-            f"📅 <b>Tarih:</b> {now_tr}\n"
+            f"🌙 <b>GÜNLÜK MUM KAPANIŞI (UTC 00:00 / TSİ 03:00)</b>\n"
+            f"📅 <i>Tarih: {now_tr}</i>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 <b>Bitcoin (BTC) Kapanış:</b> <code>${close_p:,.2f}</code>\n"
-            f"📊 <b>Günlük Değişim:</b> {c_icon} (<code>{chg_pct:+.2f}%</code>)\n"
-            f"📏 <b>Gün İçi Aralık:</b> <code>${low_p:,.2f}</code> - <code>${high_p:,.2f}</code>\n"
-            f"📈 <b>Trend Durumu:</b> {ema_status}\n\n"
-            f"🛡️ <b>Yeni Günün Ana Desteği:</b> <code>{s_str}</code>\n"
-            f"🎯 <b>Yeni Günün Ana Direnci:</b> <code>{r_str}</code>\n\n"
-            f"🎭 <b>Korku/Açgözlülük:</b> {fear_greed}\n"
-            f"📊 <b>Dominans:</b> BTC %{btcd_val:.2f} | USDT %{usdt_val:.2f}\n\n"
+            f"🪙 <b>Bitcoin Kapanış:</b> <code>${close_p:,.2f}</code> <b>({chg_pct:+.2f}%)</b> {c_icon}\n"
+            f"📏 <b>Gün İçi Aralık :</b> <code>${low_p:,.2f}</code> — <code>${high_p:,.2f}</code>\n"
+            f"📈 <b>Trend Durumu   :</b> {ema_status}\n\n"
+            f"🛡️ <b>Yeni Seans Seviyeleri</b>\n"
+            f"• <b>Ana Destek:</b> <code>{s_str}</code>\n"
+            f"• <b>Ana Direnç:</b> <code>{r_str}</code>\n\n"
+            f"🌐 <b>Piyasa Genel Görünüm</b>\n"
+            f"• <b>Korku/Açgözlülük:</b> <b>{fear_greed}</b>\n"
+            f"• <b>Dominans        :</b> BTC %{btcd_val:.2f} │ USDT %{usdt_val:.2f}\n\n"
             f"{best_str}\n{worst_str}\n\n"
-            f"💡 <b>Yeni Seans Stratejisi:</b> Fiyat {s_str} desteğini korudukça yukarıda {r_str} direnci hedeflenir. Altına sarkmalarda temkinli olunmalıdır."
+            f"<blockquote>💡 Yeni günde {s_str} korunduğu sürece yukarıda {r_str} hedeflenir. Altında kapanışlarda temkinli olunmalıdır.</blockquote>"
         )
 
 # ==========================================
-# 4. PORTFÖY HIZLI BAKIŞ (KOMPAKT ÖZET)
+# 4. PORTFÖY HIZLI BAKIŞ
 # ==========================================
 async def build_quick_status_report():
     async with aiohttp.ClientSession() as session:
         tracked = get_tracked_coins()
         all_symbols = [("BTCUSDT", "BTC")] + [(c["symbol"], c["symbol"].replace("USDT", "")) for c in tracked]
 
-        lines = ["⚡ <b>PORTFÖY HIZLI BAKIŞ (ÖZET TABLO)</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+        lines = [
+            "⚡ <b>PORTFÖY HIZLI BAKIŞ (ÖZET)</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━"
+        ]
 
         async def get_coin_quick_row(sym, label):
             c_4h_task = fetch_crypto_klines(session, sym, "4h", 25)
@@ -854,15 +859,15 @@ async def build_quick_status_report():
                     chg_str = f"({'+%' if pct >= 0 else '-%'}{abs(pct):.1f})"
 
             bullet = "🪙" if label == "BTC" else "💎"
-            return f"{bullet} <b>{label:5}:</b> <code>{format_clean_price(cur_p)}</code> {chg_str} | 4s: <b>{s_icon}</b> | RSI: <b>{rsi_val:.0f}</b>"
+            return f"{bullet} <b>{label:5}:</b> <code>{format_clean_price(cur_p)}</code> <b>{chg_str}</b>  │  <b>{s_icon}</b>  │  RSI: <code>{rsi_val:.0f}</code>"
 
         rows = await asyncio.gather(*[get_coin_quick_row(sym, lbl) for sym, lbl in all_symbols])
         lines.extend(rows)
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━\n💡 <i>Detaylı destek/direnç ve sinyaller için /analiz butonunu kullanın.</i>")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━\n<blockquote>💡 Detaylı analiz ve seviyeler için /analiz komutunu kullanabilirsiniz.</blockquote>")
         return "\n".join(lines)
 
 # ==========================================
-# RAPOR MOTORU (ALTCOİN KARTLARI)
+# MODERN KART MOTORU (ALTCOİN KARTLARI)
 # ==========================================
 async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     sym = item["symbol"]
@@ -891,7 +896,7 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     rsis_4h = calculate_rsi_series(c_closes)
     rsi_val_4h = rsis_4h[-1] if rsis_4h else 50.0
 
-    # ATR Tabanlı Stop-Loss (1.5x ATR)
+    # ATR Tabanlı Stop-Loss
     atr_val = calculate_atr(c_4h, 14)
     stop_loss_val = max(0.0, cur_p - (1.5 * atr_val))
     stop_pct = ((stop_loss_val - cur_p) / cur_p) * 100 if cur_p > 0 else 0.0
@@ -901,8 +906,8 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
         day_open = float(c_1d[-1][1])
         if day_open > 0:
             daily_chg = ((cur_p - day_open) / day_open) * 100
-            icon = "🟢 +" if daily_chg >= 0 else "🔴 "
-            chg_badge = f"({icon}%{daily_chg:.2f})"
+            sign = "+" if daily_chg >= 0 else ""
+            chg_badge = f"({sign}{daily_chg:.2f}%)"
 
     usdt_sig = evaluate_signal(c_closes, rsi_val_4h)
     s_4h, r_4h = calculate_sr_from_candles(c_4h, cur_p)
@@ -913,7 +918,8 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     spike_msg = check_volume_spike(c_4h)
     fund_human_text = format_funding_human(fund_val)
 
-    tf_data_map = {"15d": c_15m, "1s": c_1h, "4s": c_4h, "1G": c_1d, "1H": c_1w, "1A": c_1M}
+    # Zaman Dilimi
+    tf_data_map = {"15m": c_15m, "1h": c_1h, "4h": c_4h, "1D": c_1d, "1W": c_1w, "1M": c_1M}
     tf_results = []
     for lbl, _ in TIMEFRAMES:
         candles = tf_data_map.get(lbl)
@@ -955,46 +961,45 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
         btc_badge = "⚖️ BTC ile Paralel"
 
     if "AL" in usdt_sig and "AL" in b_sig:
-        p_note = "🚀 Hem dolar bazında yükselişte hem de BTC'den daha hızlı koşuyor."
+        p_note = "Hem dolar bazında yükselişte hem de BTC'den daha hızlı koşuyor."
     elif "AL" in usdt_sig and "SAT" in b_sig:
-        p_note = "💡 Dolar bazında yön yukarı ancak Bitcoin taşımak daha avantajlı."
+        p_note = "Dolar bazında yön yukarı ancak Bitcoin taşımak daha avantajlı."
     elif "SAT" in usdt_sig and "SAT" in b_sig:
-        p_note = "🔻 Hem dolar bazında düşüşte hem de Bitcoin'e karşı eriyor."
+        p_note = "Hem dolar bazında düşüşte hem de Bitcoin'e karşı eriyor."
     elif "SAT" in usdt_sig and "AL" in b_sig:
-        p_note = "🛡️ Dolar bazında zayıf olsa da BTC'ye karşı defansif güç sergiliyor."
+        p_note = "Dolar bazında zayıf olsa da BTC'ye karşı defansif güç sergiliyor."
     elif "AL" in usdt_sig:
-        p_note = "📈 Dolar bazında alıcılı, BTC ile dengeli ilerliyor."
+        p_note = "Dolar bazında alıcılı, BTC ile dengeli ilerliyor."
     elif "SAT" in usdt_sig:
-        p_note = "📉 Dolar bazında satıcılı, temkinli olunmalı."
+        p_note = "Dolar bazında satıcılı, temkinli olunmalı."
     else:
-        p_note = "⚖️ Dolar ve BTC paritesinde dengeli/nötr görünüm."
+        p_note = "Dolar ve BTC paritesinde dengeli/nötr görünüm."
 
     alerts = []
     if spike_msg:
         alerts.append(spike_msg)
     if divergence_msg:
         alerts.append(divergence_msg)
-    alert_block = ("\n" + "\n".join(alerts)) if alerts else ""
+    alert_str = ("\n" + "\n".join(alerts)) if alerts else ""
 
-    price_line = f"<code>{format_clean_price(cur_p)}</code>"
-    if chg_badge:
-        price_line += f" <b>{chg_badge}</b>"
-
+    # Modern Kart Şablonu
     return (
         f"💎 <b>{item['name']}</b>\n"
-        f"💰 Fiyat: {price_line} | RSI (4s): <b>{rsi_val_4h:.1f}</b>\n"
-        f"🎯 <b>Dolar Sinyali (4s):</b> <b>{usdt_sig}</b>\n"
-        f"🛑 <b>Stop-Loss (1.5x ATR):</b> <code>{format_clean_price(stop_loss_val)}</code> (<code>{stop_pct:.2f}%</code>)\n"
-        f"📈 <b>6 Zaman Dilimi:</b> {' | '.join(tf_results)}\n"
-        f"🛡️ <b>Destek:</b> {s_4h} (4s) | {s_1d} (1G) | {s_1w} (1H)\n"
-        f"🎯 <b>Direnç:</b> {r_4h} (4s) | {r_1d} (1G) | {r_1w} (1H)\n"
-        f"⚡ <b>BTC Gücü:</b> {parity_text} ({btc_badge})\n"
-        f"📊 <b>Piyasa Pozisyonu:</b> {fund_human_text}\n"
-        f"💬 {p_note}{alert_block}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 <b>Fiyat:</b> <code>{format_clean_price(cur_p)}</code> <b>{chg_badge}</b>  │  <b>RSI:</b> <code>{rsi_val_4h:.1f}</code>\n"
+        f"🎯 <b>Sinyal:</b> <b>{usdt_sig}</b>  │  🛑 <b>Stop:</b> <code>{format_clean_price(stop_loss_val)}</code> <i>({stop_pct:.2f}%)</i>\n\n"
+        f"📊 <b>Zaman Dilimi Konsensüsü</b>\n"
+        f"<code>{' │ '.join(tf_results)}</code>\n\n"
+        f"🛡️ <b>Kritik Seviyeler</b>\n"
+        f"• <b>Destek :</b> {s_4h} (4s) │ {s_1d} (1G) │ {s_1w} (1H)\n"
+        f"• <b>Direnç :</b> {r_4h} (4s) │ {r_1d} (1G) │ {r_1w} (1H)\n\n"
+        f"⚡ <b>BTC Paritesi :</b> {parity_text} <i>({btc_badge})</i>\n"
+        f"📈 <b>Piyasa Poz.  :</b> {fund_human_text}\n"
+        f"<blockquote>💬 {p_note}{alert_str}</blockquote>\n"
     )
 
 # ==========================================
-# ANA RAPOR MOTORU (BITCOIN ZENGİNLEŞTİRİLMİŞ)
+# ANA RAPOR MOTORU (MODERN BITCOIN KARTI)
 # ==========================================
 async def build_full_report():
     async with aiohttp.ClientSession() as session:
@@ -1028,22 +1033,19 @@ async def build_full_report():
         btc_stop_loss = max(0.0, btc_price - (1.5 * btc_atr))
         btc_stop_pct = ((btc_stop_loss - btc_price) / btc_price) * 100 if btc_price > 0 else 0.0
 
-        # BTC Günlük Değişimi
         btc_chg_badge = ""
         if btc_1d and len(btc_1d) > 0 and btc_price > 0:
             b_open = float(btc_1d[-1][1])
             if b_open > 0:
                 b_diff = ((btc_price - b_open) / b_open) * 100
-                b_icon = "🟢 +" if b_diff >= 0 else "🔴 "
-                btc_chg_badge = f"({b_icon}%{b_diff:.2f})"
+                sign = "+" if b_diff >= 0 else ""
+                btc_chg_badge = f"({sign}{b_diff:.2f}%)"
 
-        # 3 Kademeli Destek/Direnç
         btc_s_4h, btc_r_4h = calculate_sr_from_candles(btc_c, btc_price)
         btc_s_1d, btc_r_1d = calculate_sr_from_candles(btc_1d, btc_price)
         btc_s_1w, btc_r_1w = calculate_sr_from_candles(btc_1w, btc_price)
 
-        # 6 Zaman Dilimi Taraması
-        tf_data_map_btc = {"15d": btc_15m, "1s": btc_1h, "4s": btc_c, "1G": btc_1d, "1H": btc_1w, "1A": btc_1M}
+        tf_data_map_btc = {"15m": btc_15m, "1h": btc_1h, "4h": btc_c, "1D": btc_1d, "1W": btc_1w, "1M": btc_1M}
         btc_tf_results = []
         for lbl, _ in TIMEFRAMES:
             candles = tf_data_map_btc.get(lbl)
@@ -1066,13 +1068,8 @@ async def build_full_report():
             btc_alerts.append(btc_divergence)
         btc_alert_block = ("\n" + "\n".join(btc_alerts)) if btc_alerts else ""
 
-        btc_price_line = f"<code>{format_clean_price(btc_price)}</code>"
-        if btc_chg_badge:
-            btc_price_line += f" <b>{btc_chg_badge}</b>"
-
-        # USDT Dominans Yorumu (Sıcak Para Akışı)
-        usdt_flow_note = "Nakit Kriptoya Akıyor 🟢" if usdtd_val < 5.5 else "Nakite Kaçış / Temkinli 🔴"
-        dom_note = "⚠️ <b>Dominans Yüksek:</b> Likidite BTC'de toplanıyor." if btcd_val > 56 else "🚀 <b>Dominans Dengede:</b> Altcoinlere alan açılıyor."
+        usdt_flow_note = "🟢 Nakit Kriptoya Akıyor" if usdtd_val < 5.5 else "🔴 Nakite Kaçış / Temkinli"
+        dom_note = "Likidite BTC'de toplanıyor ⚠️" if btcd_val > 56 else "Altcoinlere alan açılıyor 🚀"
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
         macro_quick_lines = []
@@ -1080,24 +1077,27 @@ async def build_full_report():
             for mev in macro_events[:2]:
                 m_title = MACRO_TRANSLATIONS.get(mev.get("title", ""), mev.get("title", ""))
                 m_time = format_iso_to_tr_time(mev.get("date", ""))
-                macro_quick_lines.append(f"• {m_title} (<code>{m_time}</code>)")
-        macro_quick_text = ("\n🗓️ <b>Yaklaşan ABD Verileri:</b>\n" + "\n".join(macro_quick_lines)) if macro_quick_lines else ""
+                macro_quick_lines.append(f"• {m_title} <i>({m_time})</i>")
+        macro_quick_text = ("\n🗓️ <b>Yaklaşan ABD Verileri</b>\n" + "\n".join(macro_quick_lines)) if macro_quick_lines else ""
 
+        # Modern Bitcoin Başlık Kartı
         header = (
-            f"📊 <b>PİYASA İSTİHBARAT RAPORU | {now_str}</b>\n"
+            f"🏛️ <b>PİYASA İSTİHBARAT RAPORU</b>\n"
+            f"📅 <i>{now_str} TSİ</i>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 <b>BITCOIN (BTC)</b>\n"
-            f"💰 Fiyat: {btc_price_line} | RSI (4s): <b>{btc_rsi:.1f}</b>\n"
-            f"🎯 <b>Dolar Sinyali (4s):</b> <b>{btc_sig}</b>\n"
-            f"🛑 <b>Stop-Loss (1.5x ATR):</b> <code>{format_clean_price(btc_stop_loss)}</code> (<code>{btc_stop_pct:.2f}%</code>)\n"
-            f"📈 <b>6 Zaman Dilimi:</b> {' | '.join(btc_tf_results)}\n"
-            f"🛡️ <b>Destek:</b> {btc_s_4h} (4s) | {btc_s_1d} (1G) | {btc_s_1w} (1H)\n"
-            f"🎯 <b>Direnç:</b> {btc_r_4h} (4s) | {btc_r_1d} (1G) | {btc_r_1w} (1H)\n"
-            f"📊 <b>Piyasa Pozisyonu:</b> {btc_fund_text}{btc_alert_block}\n\n"
-            f"──────────────\n"
-            f"🎭 <b>Korku/Açgözlülük:</b> <b>{fear_greed}</b>\n"
-            f"📊 <b>Dominans:</b> BTC <code>%{btcd_val:.2f}</code> | USDT <code>%{usdtd_val:.2f}</code> (<i>{usdt_flow_note}</i>)\n"
-            f"💡 {dom_note}"
+            f"🪙 <b>BITCOIN (BTC/USDT)</b>\n"
+            f"💵 <b>Fiyat:</b> <code>{format_clean_price(btc_price)}</code> <b>{btc_chg_badge}</b>  │  <b>RSI:</b> <code>{btc_rsi:.1f}</code>\n"
+            f"🎯 <b>Sinyal:</b> <b>{btc_sig}</b>  │  🛑 <b>Stop:</b> <code>{format_clean_price(btc_stop_loss)}</code> <i>({btc_stop_pct:.2f}%)</i>\n\n"
+            f"📊 <b>Zaman Dilimi Konsensüsü</b>\n"
+            f"<code>{' │ '.join(btc_tf_results)}</code>\n\n"
+            f"🛡️ <b>Kritik Seviyeler</b>\n"
+            f"• <b>Destek :</b> {btc_s_4h} (4s) │ {btc_s_1d} (1G) │ {btc_s_1w} (1H)\n"
+            f"• <b>Direnç :</b> {btc_r_4h} (4s) │ {btc_r_1d} (1G) │ {btc_r_1w} (1H)\n\n"
+            f"📈 <b>Piyasa Poz.  :</b> {btc_fund_text}{btc_alert_block}\n\n"
+            f"🌐 <b>Piyasa & Makro Dengesi</b>\n"
+            f"• <b>Duyarlılık :</b> <b>{fear_greed}</b>\n"
+            f"• <b>BTC Dom.   :</b> <code>%{btcd_val:.2f}</code> <i>({dom_note})</i>\n"
+            f"• <b>USDT Dom.  :</b> <code>%{usdtd_val:.2f}</code> <i>({usdt_flow_note})</i>"
             f"{macro_quick_text}\n"
         )
         cards = [header]
@@ -1167,25 +1167,25 @@ async def check_volatility_spikes_job():
                 triggered = True
                 LAST_VOLATILITY_ALERT[sym] = now
                 msg = (
-                    f"🚨 <b>ANİ FİYAT HAREKETİ (PUMP) | 15 DK</b>\n"
+                    f"🚨 <b>ANİ FİYAT HAREKETİ (PUMP)</b> <i>[15 dk]</i>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💎 <b>{coin_name}</b> sert yükseliyor! 🚀\n\n"
-                    f"📈 <b>Değişim:</b> <code>+%{pump_pct:.2f}</code>\n"
-                    f"💰 <b>Güncel Fiyat:</b> <code>{format_clean_price(cur_p)}</code>\n"
-                    f"🎯 <b>15 dk İçi Dip:</b> <code>{format_clean_price(min_p)}</code>\n"
-                    f"⚡ <b>Durum:</b> Güçlü Alım Dalgası / Kırılım"
+                    f"• <b>Değişim    :</b> <code>+{pump_pct:.2f}%</code>\n"
+                    f"• <b>Güncel     :</b> <code>{format_clean_price(cur_p)}</code>\n"
+                    f"• <b>15dk Dip   :</b> <code>{format_clean_price(min_p)}</code>\n\n"
+                    f"<blockquote>⚡ Durum: Güçlü Alım Dalgası / Kırılım</blockquote>"
                 )
             elif dump_pct <= -threshold:
                 triggered = True
                 LAST_VOLATILITY_ALERT[sym] = now
                 msg = (
-                    f"🚨 <b>ANİ FİYAT HAREKETİ (DUMP) | 15 DK</b>\n"
+                    f"🚨 <b>ANİ FİYAT HAREKETİ (DUMP)</b> <i>[15 dk]</i>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💎 <b>{coin_name}</b> sert düşüyor! 📉\n\n"
-                    f"📉 <b>Değişim:</b> <code>%{dump_pct:.2f}</code>\n"
-                    f"💰 <b>Güncel Fiyat:</b> <code>{format_clean_price(cur_p)}</code>\n"
-                    f"🎯 <b>15 dk İçi Tepe:</b> <code>{format_clean_price(max_p)}</code>\n"
-                    f"⚡ <b>Durum:</b> Sert Satış Dalgası / Tasfiye"
+                    f"• <b>Değişim    :</b> <code>{dump_pct:.2f}%</code>\n"
+                    f"• <b>Güncel     :</b> <code>{format_clean_price(cur_p)}</code>\n"
+                    f"• <b>15dk Tepe  :</b> <code>{format_clean_price(max_p)}</code>\n\n"
+                    f"<blockquote>⚡ Durum: Sert Satış Dalgası / Tasfiye</blockquote>"
                 )
 
             if triggered and msg:
@@ -1279,9 +1279,9 @@ async def check_price_alarms_job():
                     f"🔔 <b>FİYAT ALARMI TETİKLENDİ!</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💎 <b>{symbol}:</b> Hedef fiyata ulaştı!\n"
-                    f"🎯 Hedef: <code>${target_price:,.4f}</code>\n"
-                    f"💰 Güncel Fiyat: <code>${cur_price:,.4f}</code>\n"
-                    f"⚡ Durum: <b>{direction_icon}</b>"
+                    f"• <b>Hedef Fiyat:</b> <code>${target_price:,.4f}</code>\n"
+                    f"• <b>Güncel Fiyat:</b> <code>${cur_price:,.4f}</code>\n"
+                    f"• <b>Kırılım Durumu:</b> <b>{direction_icon}</b>"
                 )
                 try:
                     await bot.send_message(chat_id, msg)
@@ -1301,7 +1301,7 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
 async def send_market_report(chat_id):
-    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nDolar trendleri, ATR stopları ve göstergeler taranıyor...")
+    await bot.send_message(chat_id, "⏳ <i>Piyasa istihbaratı derleniyor...</i>")
     try:
         cards = await build_full_report()
         for card in cards:
@@ -1513,9 +1513,9 @@ async def cmd_alarm(message: Message):
     await message.reply(
         f"⏰ <b>Fiyat Alarmı Kuruldu! (ID: {alarm_id})</b>\n\n"
         f"🪙 <b>{usdt_symbol}</b>\n"
-        f"💰 Güncel Fiyat: <code>${cur_price:,.4f}</code>\n"
-        f"🎯 Hedef Fiyat: <code>${target_price:,.4f}</code>\n"
-        f"⚡ Fiyat {target_price:,.4f} seviyesinin <b>{dir_text}</b> bildirim alacaksınız."
+        f"• <b>Güncel:</b> <code>${cur_price:,.4f}</code>\n"
+        f"• <b>Hedef :</b> <code>${target_price:,.4f}</code>\n"
+        f"⚡ <i>Fiyat {target_price:,.4f} seviyesinin {dir_text} bildirim alacaksınız.</i>"
     )
 
 @dp.message(Command("alarm_sil"))
@@ -1545,7 +1545,7 @@ async def cmd_alarm_sil(message: Message):
 @dp.message(Command("liste"))
 async def cmd_liste(message: Message):
     tracked = get_tracked_coins()
-    coin_lines = [f"• <b>{c['name']}</b> ({c['symbol']})" for c in tracked]
+    coin_lines = [f"• <b>{c['name']}</b> (<code>{c['symbol']}</code>)" for c in tracked]
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -1554,15 +1554,15 @@ async def cmd_liste(message: Message):
     conn.close()
 
     if alarms:
-        alarm_lines = [f"• ID <b>#{a[0]}</b>: {a[1]} -> <code>${a[2]:,.4f}</code> ({'Yukarı' if a[3]=='ABOVE' else 'Aşağı'})" for a in alarms]
+        alarm_lines = [f"• <b>#{a[0]}</b>: {a[1]} ➔ <code>${a[2]:,.4f}</code> (<i>{'Yukarı' if a[3]=='ABOVE' else 'Aşağı'}</i>)" for a in alarms]
         alarm_text = "\n".join(alarm_lines)
     else:
         alarm_text = "<i>Aktif fiyat alarmınız yok.</i>"
 
     text = (
-        "📋 <b>TAKİP EDİLEN COINLER:</b>\n" +
+        "📋 <b>TAKİP EDİLEN COINLER</b>\n" +
         ("\n".join(coin_lines) if coin_lines else "<i>Liste boş.</i>") +
-        "\n\n⏰ <b>AKTİF ALARMLARINIZ:</b>\n" + alarm_text
+        "\n\n⏰ <b>AKTİF ALARMLAR</b>\n" + alarm_text
     )
     await message.answer(text)
 
@@ -1624,7 +1624,7 @@ async def main():
     scheduler.add_job(check_breaking_news_job, 'interval', seconds=90)
     # 5. Ani Fiyat Hareketi (Volatilite) Radarı (Her 60 sn)
     scheduler.add_job(check_volatility_spikes_job, 'interval', seconds=60)
-    # 6. Canlı Kaldıraç & Sıkışma (Squeeze) Radarı (Her 2 dakikada bir otomatik tarama)
+    # 6. Canlı Kaldıraç & Sıkışma (Squeeze) Radarı (Her 2 dakikada bir)
     scheduler.add_job(check_leverage_squeeze_job, 'interval', minutes=2)
 
     scheduler.start()
