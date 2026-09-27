@@ -138,7 +138,6 @@ def init_db():
         ]
         cursor.executemany("INSERT INTO tracked_coins VALUES (?, ?, ?)", default_coins)
 
-    # Başlangıç ETF önbelleği
     cursor.execute("SELECT COUNT(*) FROM etf_cache")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT OR REPLACE INTO etf_cache VALUES ('BTC', 'Son Seans', 159.5, 98.2, 45.1, -12.4, CURRENT_TIMESTAMP)")
@@ -489,7 +488,7 @@ async def fetch_filtered_rss_news(session):
     return []
 
 # ==========================================
-# 1. SPOT ETF AKIŞLARI (HATA KORUMALI & CACHELİ)
+# 1. SPOT ETF AKIŞLARI (CACHELİ & GÜÇLÜ)
 # ==========================================
 def parse_farside_table(html):
     try:
@@ -558,7 +557,6 @@ async def fetch_etf_flows_report(session):
     except Exception as e:
         logging.warning(f"Farside ETH isteği hatası: {e}")
 
-    # Canlı veri gelmediyse veritabanındaki son resmi seansı getir
     if not btc_data:
         btc_data = get_etf_cache("BTC")
     if not eth_data:
@@ -803,7 +801,7 @@ async def build_daily_close_report():
         )
 
 # ==========================================
-# RAPOR MOTORU (6 ZAMAN DİLİMLİ ANALİZ)
+# RAPOR MOTORU (ALTCOİN KARTLARI)
 # ==========================================
 async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     sym = item["symbol"]
@@ -831,6 +829,14 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
     c_closes = [float(c[4]) for c in c_4h]
     rsis_4h = calculate_rsi_series(c_closes)
     rsi_val_4h = rsis_4h[-1] if rsis_4h else 50.0
+
+    chg_badge = ""
+    if c_1d and len(c_1d) > 0:
+        day_open = float(c_1d[-1][1])
+        if day_open > 0:
+            daily_chg = ((cur_p - day_open) / day_open) * 100
+            icon = "🟢 +" if daily_chg >= 0 else "🔴 "
+            chg_badge = f"({icon}%{daily_chg:.2f})"
 
     usdt_sig = evaluate_signal(c_closes, rsi_val_4h)
     s_4h, r_4h = calculate_sr_from_candles(c_4h, cur_p)
@@ -904,9 +910,13 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
         alerts.append(divergence_msg)
     alert_block = ("\n" + "\n".join(alerts)) if alerts else ""
 
+    price_line = f"<code>{format_clean_price(cur_p)}</code>"
+    if chg_badge:
+        price_line += f" <b>{chg_badge}</b>"
+
     return (
         f"💎 <b>{item['name']}</b>\n"
-        f"💰 Fiyat: <code>{format_clean_price(cur_p)}</code> | RSI (4s): <b>{rsi_val_4h:.1f}</b>\n"
+        f"💰 Fiyat: {price_line} | RSI (4s): <b>{rsi_val_4h:.1f}</b>\n"
         f"🎯 <b>Dolar Sinyali (4s):</b> <b>{usdt_sig}</b>\n"
         f"📈 <b>6 Zaman Dilimi:</b> {' | '.join(tf_results)}\n"
         f"🛡️ <b>Destek:</b> {s_4h} (4s) | {s_1d} (1G) | {s_1w} (1H)\n"
@@ -916,22 +926,80 @@ async def build_single_coin_card(session, item, btc_c, btc_price, btc_closes):
         f"💬 {p_note}{alert_block}\n"
     )
 
+# ==========================================
+# ANA RAPOR MOTORU (BITCOIN ZENGİNLEŞTİRİLMİŞ)
+# ==========================================
 async def build_full_report():
     async with aiohttp.ClientSession() as session:
-        btc_c, btcd_val, fear_greed, btc_fund_val, macro_events = await asyncio.gather(
-            fetch_crypto_klines(session, "BTCUSDT", "4h", 35),
-            fetch_btc_dominance(session),
-            fetch_fear_and_greed(session),
-            fetch_funding_rate_value(session, "BTCUSDT"),
-            fetch_macro_calendar(session)
+        # Bitcoin için tüm zaman dilimlerini ve göstergeleri paralel çekiyoruz
+        btc_4h_task = fetch_crypto_klines(session, "BTCUSDT", "4h", 35)
+        btc_1d_task = fetch_crypto_klines(session, "BTCUSDT", "1d", 20)
+        btc_1w_task = fetch_crypto_klines(session, "BTCUSDT", "1w", 20)
+        btc_15m_task = fetch_crypto_klines(session, "BTCUSDT", "15m", 25)
+        btc_1h_task = fetch_crypto_klines(session, "BTCUSDT", "1h", 25)
+        btc_1M_task = fetch_crypto_klines(session, "BTCUSDT", "1M", 15)
+        btcd_task = fetch_btc_dominance(session)
+        fear_greed_task = fetch_fear_and_greed(session)
+        btc_fund_task = fetch_funding_rate_value(session, "BTCUSDT")
+        macro_task = fetch_macro_calendar(session)
+
+        results = await asyncio.gather(
+            btc_4h_task, btc_1d_task, btc_1w_task, btc_15m_task, btc_1h_task, btc_1M_task,
+            btcd_task, fear_greed_task, btc_fund_task, macro_task
         )
+        btc_c, btc_1d, btc_1w, btc_15m, btc_1h, btc_1M, btcd_val, fear_greed, btc_fund_val, macro_events = results
 
         btc_price = float(btc_c[-1][4]) if btc_c else 0.0
         btc_closes = [float(c[4]) for c in btc_c] if btc_c else []
         btc_rsis = calculate_rsi_series(btc_closes)
         btc_rsi = btc_rsis[-1] if btc_rsis else 50.0
+
+        # 1. Dolar Sinyali (4s)
         btc_sig = evaluate_signal(btc_closes, btc_rsi)
+
+        # 2. Günlük Değişim Yüzdesi
+        btc_chg_badge = ""
+        if btc_1d and len(btc_1d) > 0 and btc_price > 0:
+            b_open = float(btc_1d[-1][1])
+            if b_open > 0:
+                b_diff = ((btc_price - b_open) / b_open) * 100
+                b_icon = "🟢 +" if b_diff >= 0 else "🔴 "
+                btc_chg_badge = f"({b_icon}%{b_diff:.2f})"
+
+        # 3. 3 Kademeli Destek ve Direnç (4s, 1G, 1H)
+        btc_s_4h, btc_r_4h = calculate_sr_from_candles(btc_c, btc_price)
+        btc_s_1d, btc_r_1d = calculate_sr_from_candles(btc_1d, btc_price)
+        btc_s_1w, btc_r_1w = calculate_sr_from_candles(btc_1w, btc_price)
+
+        # 4. 6 Zaman Dilimi Taraması (15d, 1s, 4s, 1G, 1H, 1A)
+        tf_data_map_btc = {"15d": btc_15m, "1s": btc_1h, "4s": btc_c, "1G": btc_1d, "1H": btc_1w, "1A": btc_1M}
+        btc_tf_results = []
+        for lbl, _ in TIMEFRAMES:
+            candles = tf_data_map_btc.get(lbl)
+            if candles:
+                cls = [float(c[4]) for c in candles]
+                r_s = calculate_rsi_series(cls)
+                sig = evaluate_signal(cls, r_s[-1] if r_s else 50.0)
+            else:
+                sig = "⚪"
+            btc_tf_results.append(f"{lbl}:{'🟢' if 'AL' in sig else ('🔴' if 'SAT' in sig else '⚪')}")
+
+        # 5. Piyasa Pozisyonu (Fonlama)
         btc_fund_text = format_funding_human(btc_fund_val)
+
+        # Uyumsuzluk ve Hacim Anomalileri
+        btc_divergence = check_rsi_divergence(btc_closes, btc_rsis)
+        btc_spike = check_volume_spike(btc_c)
+        btc_alerts = []
+        if btc_spike:
+            btc_alerts.append(btc_spike)
+        if btc_divergence:
+            btc_alerts.append(btc_divergence)
+        btc_alert_block = ("\n" + "\n".join(btc_alerts)) if btc_alerts else ""
+
+        btc_price_line = f"<code>{format_clean_price(btc_price)}</code>"
+        if btc_chg_badge:
+            btc_price_line += f" <b>{btc_chg_badge}</b>"
 
         dom_note = "⚠️ <b>Dominans Yüksek:</b> Likidite BTC'de toplanıyor." if btcd_val > 56 else "🚀 <b>Dominans Dengede:</b> Altcoinlere alan açılıyor."
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -944,12 +1012,18 @@ async def build_full_report():
                 macro_quick_lines.append(f"• {m_title} (<code>{m_time}</code>)")
         macro_quick_text = ("\n🗓️ <b>Yaklaşan ABD Verileri:</b>\n" + "\n".join(macro_quick_lines)) if macro_quick_lines else ""
 
+        # Eksiksiz Zenginleştirilmiş Bitcoin ve Piyasa Başlık Kartı
         header = (
             f"📊 <b>PİYASA İSTİHBARAT RAPORU | {now_str}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 <b>Bitcoin (BTC):</b> <code>${btc_price:,.2f}</code> | RSI (4s): <b>{btc_rsi:.1f}</b>\n"
-            f"🎯 Sinyal (4s): <b>{btc_sig}</b>\n"
-            f"📈 <b>Piyasa Pozisyonu:</b> {btc_fund_text}\n\n"
+            f"🪙 <b>BITCOIN (BTC)</b>\n"
+            f"💰 Fiyat: {btc_price_line} | RSI (4s): <b>{btc_rsi:.1f}</b>\n"
+            f"🎯 <b>Dolar Sinyali (4s):</b> <b>{btc_sig}</b>\n"
+            f"📈 <b>6 Zaman Dilimi:</b> {' | '.join(btc_tf_results)}\n"
+            f"🛡️ <b>Destek:</b> {btc_s_4h} (4s) | {btc_s_1d} (1G) | {btc_s_1w} (1H)\n"
+            f"🎯 <b>Direnç:</b> {btc_r_4h} (4s) | {btc_r_1d} (1G) | {btc_r_1w} (1H)\n"
+            f"📊 <b>Piyasa Pozisyonu:</b> {btc_fund_text}{btc_alert_block}\n\n"
+            f"──────────────\n"
             f"🎭 <b>Korku/Açgözlülük:</b> <b>{fear_greed}</b>\n"
             f"📊 <b>BTC Dominansı:</b> <code>%{btcd_val:.2f}</code>\n"
             f"💡 {dom_note}"
@@ -1156,7 +1230,7 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
 async def send_market_report(chat_id):
-    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nDolar trendleri ve makro göstergeler taranıyor...")
+    await bot.send_message(chat_id, "⏳ <b>Piyasa İstihbaratı Derleniyor...</b>\nDolar trendleri ve göstergeler taranıyor...")
     try:
         cards = await build_full_report()
         for card in cards:
@@ -1207,7 +1281,7 @@ async def cmd_start(message: Message):
     
     help_text = (
         "🚀 <b>Kripto İstihbarat & Makro Terminali Aktif!</b>\n\n"
-        "• <b>/analiz:</b> Bağımsız Dolar Sinyali & 3 Kademeli S/R seviyeleri.\n"
+        "• <b>/analiz:</b> BTC & Altcoin Dolar Sinyali, 6 Zaman Dilimi & 3 Kademeli S/R.\n"
         "• <b>/etf:</b> Spot Bitcoin & Ethereum ETF net giriş/çıkışları.\n"
         "• <b>/tasfiye:</b> Long/Short oranları, tasfiyeler & Açık Pozisyon (OI).\n"
         "• <b>/kapanis:</b> Günlük mum kapanış değerlendirmesi.\n"
