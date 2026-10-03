@@ -19,7 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # ==========================================
 # AYARLAR VE VERİTABANI (SADECE HABER & MAKRO)
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8844777837:AAElweutOxRS5dZN22adZudzVD1fVWJ7Dp0"
+TELEGRAM_BOT_TOKEN = "8844777837:AAGDcmAxtmVVCQcXFiMklcv7e_fC8ZTbamQ"
 TARGET_CHAT_ID = None
 
 logging.basicConfig(level=logging.INFO)
