@@ -17,20 +17,20 @@ from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ==========================================
-# AYARLAR VE VERİTABANI
+# AYARLAR VE VERİTABANI (SADECE HABER & MAKRO)
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8844777837:AAElweutOxRS5dZN22adZudzVD1fVWJ7Dp0"
 TARGET_CHAT_ID = None
 
 logging.basicConfig(level=logging.INFO)
-DB_PATH = "kripto_makro_bot.db"
+DB_PATH = "kripto_haber_makro.db" # Veritabanı adını sıfırladık ki eski kalıntılar gitsin
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "application/rss+xml, application/xml, text/xml, */*"
 }
 
-# Piyasayı sarsacak kritik anahtar kelimeler (Gereksiz proje haberlerini eler)
+# Piyasayı sarsacak kritik anahtar kelimeler
 CRITICAL_KEYWORDS = [
     "sec", "fed", "fomc", "powell", "etf", "blackrock", "fidelity", "grayscale",
     "hack", "exploit", "stolen", "lawsuit", "sues", "approval", "approved", "banned",
@@ -43,13 +43,31 @@ RSS_FEEDS = {
     "The Block": "https://www.theblock.co/rss.xml",
     "Decrypt": "https://decrypt.co/feed",
     "Blockworks": "https://blockworks.co/feed",
-    "CoinTelegraph": "https://cointelegraph.com/rss"
+    "CoinTelegraph": "https://cointelegraph.com/rss",
+    "Bitcoin Magazine": "https://bitcoinmagazine.com/feed"
+}
+
+MACRO_TRANSLATIONS = {
+    "Federal Funds Rate": "FED Faiz Kararı 🏦",
+    "FOMC Statement": "FOMC Faiz Beyanatı 🏦",
+    "FOMC Press Conference": "FED Powell Basın Toplantısı 🎙️️",
+    "Non-Farm Employment Change": "Tarım Dışı İstihdam (NFP) 🚜",
+    "Unemployment Rate": "ABD İşsizlik Oranı 👥",
+    "CPI m/m": "TÜFE (Aylık Enflasyon) 🛒",
+    "CPI y/y": "TÜFE (Yıllık Enflasyon) 🛒",
+    "Core CPI m/m": "Çekirdek TÜFE Enflasyonu 🛒",
+    "Core PCE Price Index m/m": "Çekirdek PCE (FED Favori Enflasyon) 🎯",
+    "Advance GDP q/q": "ABD Büyüme (GSYİH) 📊",
+    "PPI m/m": "ÜFE (Üretici Enflasyonu) 🏭",
+    "Retail Sales m/m": "ABD Perakende Satışlar 🛍️",
+    "ISM Manufacturing PMI": "İmalat PMI Endeksi 🏭",
+    "ISM Services PMI": "Hizmet PMI Endeksi 🏢"
 }
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Gönderilen haberler (Tekilleştirme için)
+    # Sadece haber geçmişi ve makro alarm kayıtları tutulur
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sent_news (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +76,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Makro veri alarmları (Aynı alarmı 2 kez atmamak için)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS macro_alerts (
             event_hash TEXT PRIMARY KEY,
@@ -114,7 +131,6 @@ def is_similar_news(new_title, recent_titles):
         if not words_new or not words_old:
             continue
         common = words_new.intersection(words_old)
-        # Eğer iki başlık 3'ten fazla ortak anlamlı kelime içeriyorsa aynı haberdir
         if len(common) >= 3:
             return True
     return False
@@ -130,13 +146,12 @@ async def fetch_single_rss(session, source_name, url):
                 root = ET.fromstring(xml_data)
                 items = root.findall(".//item")
                 parsed = []
-                for it in items[:7]:  # Sadece en yeni 7 haberi al
+                for it in items[:7]:
                     t_elem = it.find("title")
                     l_elem = it.find("link")
                     if t_elem is not None and l_elem is not None:
                         t_str = t_elem.text.strip()
                         l_str = l_elem.text.strip()
-                        # Sadece kritik kelimeleri içerenleri filtrele
                         if any(kw in t_str.lower() for kw in CRITICAL_KEYWORDS):
                             parsed.append({"title": t_str, "link": l_str, "source": source_name})
                 return parsed
@@ -152,12 +167,10 @@ async def fetch_all_news_job():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Son 12 saatteki haber başlıklarını hafızaya al (Tekilleştirme için)
     cursor.execute("SELECT title_en FROM sent_news ORDER BY id DESC LIMIT 40")
     recent_titles = [r[0] for r in cursor.fetchall()]
 
     async with aiohttp.ClientSession() as session:
-        # Tüm RSS kaynaklarını paralel çek
         tasks = [fetch_single_rss(session, name, url) for name, url in RSS_FEEDS.items()]
         results = await asyncio.gather(*tasks)
         
@@ -170,19 +183,15 @@ async def fetch_all_news_job():
             title_en = news["title"]
             source = news["source"]
 
-            # 1. URL daha önce gönderilmiş mi?
             cursor.execute("SELECT 1 FROM sent_news WHERE link = ?", (link,))
             if cursor.fetchone():
                 continue
 
-            # 2. Farklı URL ama aynı konu mu? (Deduplication)
             if is_similar_news(title_en, recent_titles):
-                # Sadece veritabanına ekle ama bildirim atma (Spam engelleme)
                 cursor.execute("INSERT INTO sent_news (link, title_en) VALUES (?, ?)", (link, title_en))
                 conn.commit()
                 continue
 
-            # Haber temiz, veritabanına kaydet ve bildir
             cursor.execute("INSERT INTO sent_news (link, title_en) VALUES (?, ?)", (link, title_en))
             conn.commit()
             recent_titles.append(title_en)
@@ -208,7 +217,6 @@ async def fetch_all_news_job():
 # ABD MAKRO & FED RADARI
 # ==========================================
 def parse_macro_date(date_str):
-    """ForexFactory ISO tarihini UTC datetime objesine çevirir"""
     try:
         dt = datetime.fromisoformat(date_str)
         return dt.astimezone(timezone.utc)
@@ -225,7 +233,6 @@ async def get_macro_events(session):
                 for e in events:
                     if e.get("country") == "USD" and e.get("impact") in ["High", "Medium"]:
                         t = e.get("title", "")
-                        # Piyasayı vuran temel veriler
                         if any(k in t for k in ["CPI", "PCE", "Fed", "FOMC", "Non-Farm", "Unemployment", "GDP"]):
                             usd_high.append(e)
                 return usd_high
@@ -234,7 +241,6 @@ async def get_macro_events(session):
     return []
 
 async def macro_tracker_job():
-    """Her dakika çalışarak makro takvimi kontrol eden ana avcı"""
     target_id = TARGET_CHAT_ID or get_saved_chat_id()
     if not target_id:
         return
@@ -259,7 +265,6 @@ async def macro_tracker_job():
             if not ev_dt:
                 continue
 
-            # Benzersiz ID oluştur
             event_hash = f"{title}_{date_str[:10]}"
             cursor.execute("SELECT alert_1h, alert_5m, alert_result FROM macro_alerts WHERE event_hash = ?", (event_hash,))
             row = cursor.fetchone()
@@ -277,7 +282,6 @@ async def macro_tracker_job():
             tr_title = MACRO_TRANSLATIONS.get(title, title)
             event_time_tr = ev_dt.astimezone(timezone(timedelta(hours=3))).strftime("%H:%M")
 
-            # 1. BİLDİRİM: 1 SAAT KALA
             if 0 < mins_left <= 65 and alert_1h == 0:
                 msg = (
                     f"⏳ <b>MAKRO VERİ UYARISI | 1 SAAT KALDI</b>\n"
@@ -291,7 +295,6 @@ async def macro_tracker_job():
                 cursor.execute("UPDATE macro_alerts SET alert_1h = 1 WHERE event_hash = ?", (event_hash,))
                 conn.commit()
 
-            # 2. BİLDİRİM: 5 DAKİKA KALA
             elif 0 < mins_left <= 6 and alert_5m == 0:
                 msg = (
                     f"🚨 <b>KEMERLERİ BAĞLAYIN | SON 5 DAKİKA!</b>\n"
@@ -303,15 +306,12 @@ async def macro_tracker_job():
                 cursor.execute("UPDATE macro_alerts SET alert_5m = 1 WHERE event_hash = ?", (event_hash,))
                 conn.commit()
 
-            # 3. BİLDİRİM: VERİ AÇIKLANDIĞI AN (CANLI SONUÇ)
-            # Zamanı gelmiş VEYA geçmiş ve 'actual' verisi girilmişse
             elif mins_left <= 0 and actual and alert_result == 0:
-                # Otomatik Yorum Mekanizması
                 comment = ""
                 if "CPI" in title or "PCE" in title:
-                    comment = "💡 <b>Yorum:</b> Enflasyon verisi açıklandı. (<i>Düşük gelmesi FED'i rahatlatır, BTC için Boğa; Yüksek gelmesi Doları güçlendirir, BTC için Ayı algılanır.</i>)"
+                    comment = "💡 <b>Yorum:</b> Enflasyon verisi açıklandı. (Düşük gelmesi FED'i rahatlatır, BTC için Boğa; Yüksek gelmesi Doları güçlendirir, BTC için Ayı algılanır.)"
                 elif "Non-Farm" in title or "Unemployment" in title:
-                    comment = "💡 <b>Yorum:</b> İstihdam verisi açıklandı. (<i>İstihdamın düşük gelmesi piyasaya para basılacağı beklentisi yaratır -> BTC Pozitif.</i>)"
+                    comment = "💡 <b>Yorum:</b> İstihdam verisi açıklandı. (İstihdamın düşük gelmesi piyasaya para basılacağı beklentisi yaratır -> BTC Pozitif.)"
                 elif "Fed" in title or "FOMC" in title:
                     comment = "💡 <b>Yorum:</b> FED kararı geldi. Likidite ve faiz oranları tüm piyasanın kaderini belirleyecek."
 
@@ -322,7 +322,7 @@ async def macro_tracker_job():
                     f"🟢 <b>AÇIKLANAN:</b> <code>{actual}</code>\n"
                     f"🟡 <b>Beklenti :</b> <code>{forecast or 'Yok'}</code>\n"
                     f"⚪ <b>Önceki   :</b> <code>{previous or 'Yok'}</code>\n\n"
-                    f"{comment}"
+                    f"<blockquote>{comment}</blockquote>"
                 )
                 await bot.send_message(target_id, msg)
                 cursor.execute("UPDATE macro_alerts SET alert_result = 1 WHERE event_hash = ?", (event_hash,))
@@ -331,7 +331,7 @@ async def macro_tracker_job():
         conn.close()
 
 # ==========================================
-# MANUEL KOMUTLAR
+# TELEGRAM KOMUTLARI
 # ==========================================
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -349,8 +349,8 @@ async def cmd_start(message: Message):
     ])
     
     help_text = (
-        "🚀 <b>Kripto İstihbarat & Makro Radarı Aktif!</b>\n\n"
-        "Eski ağır analizleri bir kenara bıraktık. Artık sadece hıza ve global istihbarata odaklıyız.\n\n"
+        "🚀 <b>Küresel İstihbarat & Makro Terminali Aktif!</b>\n\n"
+        "Fiyat analizleri tamamen kaldırıldı. Bu bot artık sadece piyasayı sarsacak <b>haberlere ve makroekonomik verilere</b> odaklıdır.\n\n"
         "📡 <b>Arka Plan Servisleri (Otomatik):</b>\n"
         "• <b>6 Kaynaklı Haber Ağı:</b> ABD ve Kripto medyasındaki kritik (SEC, ETF, Hack) gelişmeleri yakalar, Türkçeye çevirir ve anında iletir. (Tekrarlayan haberler elenir).\n"
         "• <b>Makro Geri Sayım:</b> Enflasyon, İstihdam ve FED kararlarına 1 saat kala, 5 dk kala uyarır; açıklandığı saniye sonucu ekrana basar.\n\n"
