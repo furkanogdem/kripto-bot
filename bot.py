@@ -111,7 +111,6 @@ def save_chat_id(chat_id):
 # ÇİFT MOTORLU TÜRKÇE ÇEVİRİ 
 # ==========================================
 async def translate_to_turkish(session, text):
-    # 1. Yöntem: Google Translate API (Özel Tarayıcı Başlığıyla)
     try:
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tr&dt=t&q={urllib.parse.quote(text)}"
         tr_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -123,7 +122,6 @@ async def translate_to_turkish(session, text):
     except Exception as e:
         logging.warning(f"Google Translate hatası: {e}")
 
-    # 2. Yöntem: MyMemory API (Google engellerse yedek devreye girer)
     try:
         url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair=en|tr"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
@@ -135,7 +133,6 @@ async def translate_to_turkish(session, text):
     except Exception as e:
         logging.warning(f"MyMemory Translate hatası: {e}")
 
-    # İkisi de tamamen çökerse İngilizce devam et
     return text
 
 def is_similar_news(new_title, recent_titles):
@@ -254,6 +251,51 @@ async def get_macro_events(session):
         logging.error(f"Makro çekim hatası: {e}")
     return []
 
+# HER GÜN SAAT 09:00'DA ÇALIŞACAK BÜLTEN FONKSİYONU
+async def send_daily_macro_bulletin():
+    target_id = TARGET_CHAT_ID or get_saved_chat_id()
+    if not target_id:
+        return
+
+    async with aiohttp.ClientSession() as session:
+        events = await get_macro_events(session)
+    
+    if not events:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    upcoming_events = []
+    
+    # Sadece gelecekteki verileri filtrele (Geçmiş günlerin verileri atılmaz)
+    for ev in events:
+        ev_dt = parse_macro_date(ev.get("date", ""))
+        if ev_dt and ev_dt > now_utc - timedelta(hours=1):
+            upcoming_events.append(ev)
+
+    if not upcoming_events:
+        return
+
+    lines = ["📅 <b>GÜNLÜK MAKRO EKONOMİ TAKVİMİ (Yaklaşan Veriler)</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+    for ev in upcoming_events:
+        raw_title = ev.get("title", "")
+        tr_name = MACRO_TRANSLATIONS.get(raw_title, raw_title)
+        
+        dt = parse_macro_date(ev.get("date", ""))
+        time_str = dt.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M") if dt else ev.get("date", "")
+        
+        forc, prev = ev.get("forecast"), ev.get("previous")
+        status = f"⏳ Beklenti: <code>{forc or '—'}</code> │ Önceki: <code>{prev or '—'}</code>"
+
+        lines.append(f"📌 <b>{tr_name}</b>\n⏰ {time_str} TSİ\n{status}\n")
+
+    lines.append("<blockquote>💡 <i>Veri açıklanmasına 1 saat ve 5 dk kala sistem sizi otomatik olarak uyaracaktır.</i></blockquote>")
+    
+    try:
+        await bot.send_message(target_id, "\n".join(lines))
+    except Exception as e:
+        logging.error(f"Günlük makro gönderim hatası: {e}")
+
+# ANLIK GERİ SAYIM BEKÇİSİ
 async def macro_tracker_job():
     target_id = TARGET_CHAT_ID or get_saved_chat_id()
     if not target_id:
@@ -366,11 +408,12 @@ async def cmd_start(message: Message):
         "🚀 <b>Küresel İstihbarat & Makro Terminali Aktif!</b>\n\n"
         "Fiyat analizleri tamamen kaldırıldı. Bu bot artık sadece piyasayı sarsacak <b>haberlere ve makroekonomik verilere</b> odaklıdır.\n\n"
         "📡 <b>Arka Plan Servisleri (Otomatik):</b>\n"
-        "• <b>6 Kaynaklı Haber Ağı:</b> ABD ve Kripto medyasındaki kritik (SEC, ETF, Hack) gelişmeleri yakalar, Türkçeye çevirir ve anında iletir. (Tekrarlayan haberler elenir).\n"
+        "• <b>6 Kaynaklı Haber Ağı:</b> Kritik gelişmeleri yakalar, Türkçeye çevirir ve anında iletir.\n"
+        "• <b>Günlük Sabah Bülteni:</b> Her gün 09:00'da o gün ve haftanın geri kalanındaki kritik ABD verilerini liste halinde atar.\n"
         "• <b>Makro Geri Sayım:</b> Enflasyon, İstihdam ve FED kararlarına 1 saat kala, 5 dk kala uyarır; açıklandığı saniye sonucu ekrana basar.\n\n"
         "⚙️ <b>Manuel Komutlar:</b>\n"
         "• <b>/haberler :</b> Sistemi tetikleyip son manşetleri zorla çeker.\n"
-        "• <b>/makro    :</b> Bu haftaki tüm kritik ABD takvimini listeler."
+        "• <b>/makro    :</b> Yaklaşan tüm kritik ABD takvimini listeler."
     )
     await message.answer(help_text, reply_markup=keyboard)
 
@@ -384,24 +427,28 @@ async def cmd_makro(message: Message):
         await message.answer("📅 <i>Bu hafta için planlanan kritik bir ABD makro verisi bulunmuyor.</i>")
         return
 
-    lines = ["🏦 <b>ABD MAKRO EKONOMİ TAKVİMİ (Bu Hafta)</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+    now_utc = datetime.now(timezone.utc)
+    lines = ["🏦 <b>ABD MAKRO EKONOMİ TAKVİMİ (Yaklaşanlar)</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+    
     for ev in events:
+        ev_dt = parse_macro_date(ev.get("date", ""))
+        # Geçmişteki verileri listede gösterme (1 saat tolerans)
+        if ev_dt and ev_dt < now_utc - timedelta(hours=1):
+            continue
+
         raw_title = ev.get("title", "")
         tr_name = MACRO_TRANSLATIONS.get(raw_title, raw_title)
-        
-        dt = parse_macro_date(ev.get("date", ""))
-        time_str = dt.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M") if dt else ev.get("date", "")
+        time_str = ev_dt.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M")
         
         act, forc, prev = ev.get("actual"), ev.get("forecast"), ev.get("previous")
-        
-        if act:
-            status = f"📊 Açıklanan: <code>{act}</code> │ Beklenti: {forc or '—'}"
-        else:
-            status = f"⏳ Beklenti: <code>{forc or '—'}</code> │ Önceki: <code>{prev or '—'}</code>"
+        status = f"⏳ Beklenti: <code>{forc or '—'}</code> │ Önceki: <code>{prev or '—'}</code>"
 
         lines.append(f"📌 <b>{tr_name}</b>\n⏰ {time_str} TSİ\n{status}\n")
 
-    await message.answer("\n".join(lines))
+    if len(lines) == 1:
+        await message.answer("📅 <i>Haftanın geri kalanı için planlanan kritik bir ABD verisi bulunmuyor.</i>")
+    else:
+        await message.answer("\n".join(lines))
 
 @dp.message(Command("haberler"))
 async def cmd_haberler(message: Message):
@@ -425,11 +472,15 @@ async def web_health_check(request):
 async def main():
     init_db()
 
-    # Otomatik Bekçiler (Çok Hızlı)
+    # Otomatik Bekçiler
     # Her 60 saniyede bir haber ağlarını tarar
     scheduler.add_job(fetch_all_news_job, 'interval', seconds=60)
+    
     # Her 60 saniyede bir Makro verileri tarar ve geri sayım kontrolü yapar
     scheduler.add_job(macro_tracker_job, 'interval', seconds=60)
+    
+    # HER GÜN SAAT 09:00'DA GÜNLÜK BÜLTEN ATAR
+    scheduler.add_job(send_daily_macro_bulletin, 'cron', hour=9, minute=0)
     
     scheduler.start()
 
