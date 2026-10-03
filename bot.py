@@ -23,7 +23,7 @@ TELEGRAM_BOT_TOKEN = "8844777837:AAGDcmAxtmVVCQcXFiMklcv7e_fC8ZTbamQ"
 TARGET_CHAT_ID = None
 
 logging.basicConfig(level=logging.INFO)
-DB_PATH = "kripto_haber_makro.db" # Veritabanı adını sıfırladık ki eski kalıntılar gitsin
+DB_PATH = "kripto_haber_makro.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -50,7 +50,7 @@ RSS_FEEDS = {
 MACRO_TRANSLATIONS = {
     "Federal Funds Rate": "FED Faiz Kararı 🏦",
     "FOMC Statement": "FOMC Faiz Beyanatı 🏦",
-    "FOMC Press Conference": "FED Powell Basın Toplantısı 🎙️️",
+    "FOMC Press Conference": "FED Powell Basın Toplantısı 🎙",
     "Non-Farm Employment Change": "Tarım Dışı İstihdam (NFP) 🚜",
     "Unemployment Rate": "ABD İşsizlik Oranı 👥",
     "CPI m/m": "TÜFE (Aylık Enflasyon) 🛒",
@@ -67,7 +67,6 @@ MACRO_TRANSLATIONS = {
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Sadece haber geçmişi ve makro alarm kayıtları tutulur
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sent_news (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,22 +108,37 @@ def save_chat_id(chat_id):
     conn.close()
 
 # ==========================================
-# ÇEVİRİ VE TEKİLLEŞTİRME (ANTI-SPAM)
+# ÇİFT MOTORLU TÜRKÇE ÇEVİRİ 
 # ==========================================
 async def translate_to_turkish(session, text):
+    # 1. Yöntem: Google Translate API (Özel Tarayıcı Başlığıyla)
     try:
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tr&dt=t&q={urllib.parse.quote(text)}"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
+        tr_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with session.get(url, headers=tr_headers, timeout=aiohttp.ClientTimeout(total=4)) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data and isinstance(data, list) and len(data) > 0 and data[0]:
                     return "".join([part[0] for part in data[0] if part[0]]).strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning(f"Google Translate hatası: {e}")
+
+    # 2. Yöntem: MyMemory API (Google engellerse yedek devreye girer)
+    try:
+        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair=en|tr"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                translated = data.get("responseData", {}).get("translatedText", "")
+                if translated and "MYMEMORY WARNING" not in translated:
+                    return translated.strip()
+    except Exception as e:
+        logging.warning(f"MyMemory Translate hatası: {e}")
+
+    # İkisi de tamamen çökerse İngilizce devam et
     return text
 
 def is_similar_news(new_title, recent_titles):
-    """Farklı sitelerden gelen aynı haberi engellemek için basit kelime kesişimi ölçer"""
     words_new = set(re.findall(r'\b\w{4,}\b', new_title.lower()))
     for old_title in recent_titles:
         words_old = set(re.findall(r'\b\w{4,}\b', old_title.lower()))
